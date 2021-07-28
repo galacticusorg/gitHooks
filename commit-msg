@@ -30,7 +30,7 @@ my $breaking;
     $breaking = $3;
 }
 ## Type is valid.
-{my @validTypes = ( "fix", "feat", "build", "docs", "style", "test" );
+{my @validTypes = ( "fix", "feat", "build", "docs", "style", "test", "refactor" );
  if ( grep {$_ eq $type} @validTypes ) {
      print color('bold green')."✔ ".color('reset')."Type is valid (https://www.conventionalcommits.org)\n";
  } else {
