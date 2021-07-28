@@ -1,0 +1,63 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+use Term::ANSIColor;
+
+# Commit message hook for Git repos.
+# Andrew Benson (28-July-2021)
+
+# Get the temporary file containing the commit message.
+my $messageFileName = $ARGV[0];
+
+# Enforce conventional commits (https://www.conventionalcommits.org) structure.
+## Header line format:
+my $type    ;
+my $scope   ;
+my $breaking;
+{
+    my $headerRegExp = qr/^([a-zA-Z0-9]+)(\([a-zA-Z0-9]+\))?(!?):\s\S/;
+    open(my $messageFile,$messageFileName);
+    my $firstLine = <$messageFile>;
+    close($messageFile);
+    if ( $firstLine =~ m/$headerRegExp/ ) {
+	print color('bold green')."✔ ".color('reset')."Commit message does follow Conventional Commits format (https://www.conventionalcommits.org)\n";
+    } else {
+	print color('bold red'  )."✕ ".color('reset')."Commit message does not follow Conventional Commits format (https://www.conventionalcommits.org)\n";
+	exit 1;
+    }
+    $type     = $1;
+    $scope    = $2;
+    $breaking = $3;
+}
+## Type is valid.
+{my @validTypes = ( "fix", "feat", "build", "docs", "style", "test" );
+ if ( grep {$_ eq $type} @validTypes ) {
+     print color('bold green')."✔ ".color('reset')."Type is valid (https://www.conventionalcommits.org)\n";
+ } else {
+     print color('bold red'  )."✕ ".color('reset')."Type is invalid (https://www.conventionalcommits.org)\n";
+     exit 1;
+ }
+}
+## BREAKING CHANGE included.
+{
+    my $breakingChangeFound = 0;
+    open(my $messageFile,$messageFileName);
+    while ( my $line = <$messageFile> ) {
+	if ( $line =~ m/^BREAKING\sCHANGE:\s/ ) {
+	    $breakingChangeFound = 1;
+	    last;
+	}
+    }
+    close($messageFile);
+    if ( $breaking eq "!" && ! $breakingChangeFound ) {
+	print color('bold red'  )."✕ ".color('reset')."'BREAKING CHANGE' footer missing (https://www.conventionalcommits.org)\n";
+	exit 1;
+    } elsif ( $breakingChangeFound && $breaking eq "" ) {
+	print color('bold red'  )."✕ ".color('reset')."'BREAKING CHANGE' footer present but '!' missing from header (https://www.conventionalcommits.org)\n";
+	exit 1;
+    } else {
+	print color('bold green')."✔ ".color('reset')."Consistent breaking change status (https://www.conventionalcommits.org)\n";
+    }
+}
+
+exit 0;

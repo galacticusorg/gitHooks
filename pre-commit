@@ -1,0 +1,156 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+use Term::ANSIColor;
+use File::Slurp qw(slurp);
+use XML::Simple;
+use XML::SAX::ParserFactory;
+use XML::Validator::Schema;
+
+# Pre-commit hook for Git repos.
+# Andrew Benson (28-July-2021)
+
+# Get a list of all staged files, along with their status.
+my @stagedFiles;
+open(my $staged,"git diff --cached --name-status |");
+while ( my $line = <$staged> ) {
+    chomp($line);
+    my @columns = split(" ",$line);
+    push(
+	@stagedFiles,
+	{
+	    status   => $columns[0],
+	    fileName => $columns[1]
+	}
+	);
+}
+close($staged);
+
+# Test XML and LaTeX fragments.
+my $xml = new XML::Simple();
+foreach my $stagedFile ( @stagedFiles ) {
+    next
+	if ( $stagedFile->{'status'} eq "D" );
+    next
+	unless ( $stagedFile->{'fileName'} =~ m/\.(F90|Inc)$/ );
+    my $inDirective       = 0;
+    my $inXML             = 0;
+    my $inLaTeX           = 0;
+    my $lineNumber        = 0;
+    my $directiveRoot        ;
+    my $rawCode              ;
+    my $rawDirective         ;
+    my $rawLaTeX             ;
+    my $strippedDirective    ;
+    open(my $code,$stagedFile->{'fileName'});
+    while ( my $line = <$code> ) {
+	# Detect the end of a LaTeX section and change state.
+	$inLaTeX = 0
+	    if ( $line =~ m/^\s*!!\}/ );
+	# Detect the end of an XML section and change state.
+	$inXML = 0
+	    if ( $line =~ m/^\s*!!\]/ );
+	# Process LaTeX blocks.
+	$rawLaTeX .= $line
+	    if ( $inLaTeX );
+	if ( defined($rawLaTeX) && ! $inLaTeX ) {
+	    my $LaTeXLog = &testLaTeX($rawLaTeX);
+	    if ( defined($LaTeXLog) ) {
+	     	print color('bold red')."✕ ".color('reset')."LaTeX fragment compilation failed (".$stagedFile->{'fileName'}.":".$lineNumber."):\n".$LaTeXLog;
+	     	exit 1;
+	    }
+	    undef($rawLaTeX);
+	}
+	# Process XML blocks.
+	my $isDirective  = 0;
+	my $endDirective = 0;
+	(my $strippedLine = $line) =~ s/^\s*\!<\s*//;
+	if ( $inXML ) {
+	    # Determine if line is a directive line.
+	    $isDirective    = 1
+		if ( $strippedLine =~ m/^\s*\<([^\s\>\/]+)/ || $inDirective == 1 );
+	    $directiveRoot = $1
+		if ( $isDirective == 1 && $inDirective == 0 );		
+	    # Catch the end of directives.
+	    $endDirective = 1
+		if ( $isDirective == 1 && $strippedLine =~ m/\s*\<\/$directiveRoot\>/ );
+	    $endDirective = 1
+		if ( $isDirective == 1 && $inDirective == 0 && ( $strippedLine =~ m/\s*\<$directiveRoot\s.*\/\>/ || $strippedLine =~ m/\s*\<$directiveRoot\/\>/ ) );
+	    # Record whether we are currently in or out of a directive.
+	    $inDirective = 1
+		if ( $isDirective == 1 );
+	}
+	# Accumulate raw text.
+	if ( $inDirective ) {
+	    $rawDirective      .= $line;
+	    $strippedDirective .= $strippedLine;
+	} elsif ( $line !~ m/^\s*!!(\[|\])/ ) {
+	    $rawCode           .= $line;
+	}
+	# Process code and directive blocks as necessary.
+	if ( ( $inDirective == 0 || eof($code) || $endDirective ) && $rawDirective ) {
+	    # Attempt to parse the directive XML.
+	    my $directive = eval{$xml->XMLin($strippedDirective, keepRoot => 1)};
+	    if ( $@ ) {
+		print color('bold red')."✕ ".color('reset')."Parsing XML fragment failed (".$stagedFile->{'fileName'}.":".$lineNumber.")\n".$@."\n";
+		print $strippedDirective;
+		exit(1);
+	    }
+	    my $directiveName = (keys %{$directive})[0];
+	    # Validate the directive if possible.
+	    if ( -e $ENV{'GALACTICUS_EXEC_PATH'}."/schema/".$directiveName.".xsd" ) {
+		my $validator = XML::Validator::Schema->new(file => $ENV{'GALACTICUS_EXEC_PATH'}."/schema/".$directiveName.".xsd");
+		my $parser    = XML::SAX::ParserFactory->parser(Handler => $validator); 
+		eval { $parser->parse_string($strippedDirective) };
+		if ( $@ ) {
+		    print color('bold red')."✕ ".color('reset')."XML fragment validation failed (".$stagedFile->{'fileName'}.":".$lineNumber."):\n".$@."\n";
+		    exit 1;
+		}
+	    }
+	    # Look for a "description" element in the directive - this should be LaTeXable.
+	    if ( exists($directive->{$directiveName}->{'description'}) ) {
+		my $LaTeXLog = &testLaTeX($directive->{$directiveName}->{'description'});
+		if ( defined($LaTeXLog) ) {
+		    print color('bold red')."✕ ".color('reset')."XML LaTeX description compilation failed (".$stagedFile->{'fileName'}.":".$lineNumber."):\n".$LaTeXLog;
+		    exit 1;
+		}
+	    }
+	    # Reset the raw directive text.
+	    $inDirective = 0;
+	    undef($rawDirective     );
+	    undef($strippedDirective);
+	}
+	# Detect the start of an XML section and change state.
+	$inXML = 1
+	    if ( $line =~ m/^\s*!!\[/ );
+	# Detect the start of a LaTeX section and change state.
+	$inLaTeX = 1
+	    if ( $line =~ m/^\s*!!\{/ );
+	# Increment line number count.
+	++$lineNumber;
+    }
+    close($code);
+}
+print color('bold green')."✔ ".color('reset')."XML fragments\n";
+print color('bold green')."✔ ".color('reset')."LaTeX fragments\n";
+
+exit 0;
+
+sub testLaTeX {
+    # Test that a LaTeX fragment compiles.
+    my $rawLaTeX = shift();
+    open(my $LaTeX,">frag.tex");
+    print $LaTeX "\\documentclass[letterpaper,10pt,headsepline]{scrbook}\n";
+    print $LaTeX "\\usepackage{natbib}\n";
+    print $LaTeX "\\begin{document}\n";
+    print $LaTeX $rawLaTeX;
+    print $LaTeX "\\end{document}\n";
+    close($LaTeX);
+    system("pdflatex -halt-on-error frag > frag.tmp");
+    my $log = $? ? slurp("frag.log") : undef();
+    foreach my $fileName ( "frag.tex", "frag.pdf", "frag.log", "frag.aux", "frag.tmp" ) {
+	unlink($fileName)
+	    if ( -e $fileName );
+    }
+    return $log;
+}
