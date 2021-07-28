@@ -56,7 +56,7 @@ foreach my $stagedFile ( @stagedFiles ) {
     next
 	if ( $stagedFile->{'status'} eq "D" );
     next
-	unless ( $stagedFile->{'fileName'} =~ m/\.xml$/ );
+	unless ( $stagedFile->{'fileName'} =~ m/\.(xml|xsd)$/ );
     system("xmllint --noout ".$stagedFile->{'fileName'});
     if ( $? != 0 ) {
 	print color('bold red')."✕ ".color('reset')."XML file is invalid (".$stagedFile->{'fileName'}.")\n";
