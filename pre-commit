@@ -3,6 +3,8 @@ use strict;
 use warnings;
 use Term::ANSIColor;
 use File::Slurp qw(slurp);
+use File::stat;
+use Fcntl "S_IXUSR";
 use XML::Simple;
 use XML::SAX::ParserFactory;
 use XML::Validator::Schema;
@@ -25,6 +27,43 @@ while ( my $line = <$staged> ) {
 	);
 }
 close($staged);
+
+# Test Perl scripts compile and are executable.
+foreach my $stagedFile ( @stagedFiles ) {
+    next
+	if ( $stagedFile->{'status'} eq "D" );
+    next
+	unless ( $stagedFile->{'fileName'} =~ m/\.p[lm]$/ );
+    # Perl scripts must be executable.
+    if ( $stagedFile->{'fileName'} =~ m/\.pl$/ ) {
+	my $stat = stat($stagedFile->{'fileName'});
+	if ( ! $stat->cando(S_IXUSR,1) ) {
+	    print color('bold red')."✕ ".color('reset')."Perl script is not executable (".$stagedFile->{'fileName'}.")\n";
+	    exit 1;
+	}
+    }
+    # Perl scripts and modules must compile.
+    system("perl -c ".$stagedFile->{'fileName'}." &> /dev/null");
+    if ( $? != 0 ) {
+	print color('bold red')."✕ ".color('reset')."Perl script/module does not compile (".$stagedFile->{'fileName'}.")\n";
+	exit 1;
+    }
+}
+print color('bold green')."✔ ".color('reset')."Perl scripts\n";
+
+# Test XML files are valid.
+foreach my $stagedFile ( @stagedFiles ) {
+    next
+	if ( $stagedFile->{'status'} eq "D" );
+    next
+	unless ( $stagedFile->{'fileName'} =~ m/\.xml$/ );
+    system("xmllint --noout ".$stagedFile->{'fileName'});
+    if ( $? != 0 ) {
+	print color('bold red')."✕ ".color('reset')."XML file is invalid (".$stagedFile->{'fileName'}.")\n";
+	exit 1;
+    }
+}
+print color('bold green')."✔ ".color('reset')."XML files\n";
 
 # Test XML and LaTeX fragments.
 my $xml = new XML::Simple();
