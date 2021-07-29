@@ -173,6 +173,25 @@ foreach my $stagedFile ( @stagedFiles ) {
 print color('bold green')."✔ ".color('reset')."XML fragments\n";
 print color('bold green')."✔ ".color('reset')."LaTeX fragments\n";
 
+# Test Perl scripts/modules and source files have no debugging statements in them.
+foreach my $stagedFile ( @stagedFiles ) {
+    next
+	if ( $stagedFile->{'status'} eq "D" );
+    next
+	unless ( $stagedFile->{'fileName'} =~ m/\.(pl|pm|F90|Inc|h|c|cpp)$/ );
+    my $lineNumber = 0;
+    open(my $code,$stagedFile->{'fileName'});
+    while ( my $line = <$code> ) {
+	++$lineNumber;
+	if ( $line =~ m/AJB HACK/ ) {
+	    print color('bold red')."✕ ".color('reset')."Debugging statement remains (".$stagedFile->{'fileName'}.":".$lineNumber."):\n";
+	    exit 1; 
+	}
+    }
+    close($code);
+}
+print color('bold green')."✔ ".color('reset')."Debugging statements removed\n";
+
 exit 0;
 
 sub testLaTeX {
