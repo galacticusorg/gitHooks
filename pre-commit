@@ -62,6 +62,18 @@ foreach my $stagedFile ( @stagedFiles ) {
 	print color('bold red')."✕ ".color('reset')."XML file is invalid (".$stagedFile->{'fileName'}.")\n";
 	exit 1;
     }
+    my $lineNumber = 0;
+    open(my $xmlFile,$stagedFile->{'fileName'});
+    while ( my $line = <$xmlFile> ) {
+	++$lineNumber;
+	if ( $line =~ m/[^[:ascii:]]/ ) {
+	    $line =~ s/([^[:ascii:]]+)/\e[31m$1\e[0m/g;
+	    print $line;
+	    print color('bold red')."✕ ".color('reset')."XML file has non-ascii character (".$stagedFile->{'fileName'}.":".$lineNumber.")\n";
+	    exit 1;
+	}
+    }
+    close($xmlFile);
 }
 print color('bold green')."✔ ".color('reset')."XML files\n";
 
