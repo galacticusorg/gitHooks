@@ -3,8 +3,6 @@ use strict;
 use warnings;
 use Term::ANSIColor;
 use File::Slurp qw(slurp);
-use File::stat;
-use Fcntl "S_IXUSR";
 use XML::Simple;
 use XML::SAX::ParserFactory;
 use XML::Validator::Schema;
@@ -36,8 +34,7 @@ foreach my $stagedFile ( @stagedFiles ) {
 	unless ( $stagedFile->{'fileName'} =~ m/\.p[lm]$/ );
     # Perl scripts must be executable.
     if ( $stagedFile->{'fileName'} =~ m/\.pl$/ ) {
-	my $stat = stat($stagedFile->{'fileName'});
-	if ( ! $stat->cando(S_IXUSR,1) ) {
+	if ( ! -x $stagedFile->{'fileName'} ) {
 	    print color('bold red')."✕ ".color('reset')."Perl script is not executable (".$stagedFile->{'fileName'}.")\n";
 	    exit 1;
 	}
