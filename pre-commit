@@ -16,6 +16,10 @@ open(my $staged,"git diff --cached --name-status |");
 while ( my $line = <$staged> ) {
     chomp($line);
     my @columns = split(" ",$line);
+    if ( $columns[0] =~ m/^R/ ) {
+	$columns[0] = "M";
+	$columns[1] = $columns[2];
+    }
     push(
 	@stagedFiles,
 	{
@@ -209,13 +213,18 @@ sub testLaTeX {
     open(my $LaTeX,">frag.tex");
     print $LaTeX "\\documentclass[letterpaper,10pt,headsepline]{scrbook}\n";
     print $LaTeX "\\usepackage{natbib}\n";
+    print $LaTeX "\\usepackage[acronym]{glossaries}\n";
+    print $LaTeX "\\usepackage[backref,colorlinks]{hyperref}\n";
+    print $LaTeX "\\input{".$ENV{'GALACTICUS_EXEC_PATH'}."/doc/commands}\n";
+    print $LaTeX "\\input{".$ENV{'GALACTICUS_EXEC_PATH'}."/doc/Glossary}\n";
+    print $LaTeX "\\newcommand{\\docname}{tmp}\n";
     print $LaTeX "\\begin{document}\n";
     print $LaTeX $rawLaTeX;
     print $LaTeX "\\end{document}\n";
     close($LaTeX);
     system("pdflatex -halt-on-error frag > frag.tmp");
     my $log = $? ? slurp("frag.log") : undef();
-    foreach my $fileName ( "frag.tex", "frag.pdf", "frag.log", "frag.aux", "frag.tmp" ) {
+    foreach my $fileName ( "frag.tex", "frag.pdf", "frag.log", "frag.aux", "frag.tmp", "frag.glo" ) {
 	unlink($fileName)
 	    if ( -e $fileName );
     }
