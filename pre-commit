@@ -44,7 +44,7 @@ foreach my $stagedFile ( @stagedFiles ) {
 	}
     }
     # Perl scripts and modules must compile.
-    system("perl -c ".$stagedFile->{'fileName'}." > /dev/null 2>&1");
+    system("perl -c ".$stagedFile->{'fileName'}." &> /dev/null");
     if ( $? != 0 ) {
 	print color('bold red')."✕ ".color('reset')."Perl script/module does not compile (".$stagedFile->{'fileName'}.")\n";
 	exit 1;
@@ -210,6 +210,8 @@ exit 0;
 sub testLaTeX {
     # Test that a LaTeX fragment compiles.
     my $rawLaTeX = shift();
+    $rawLaTeX =~ s/&amp;/&/g;
+    $rawLaTeX =~ s/&lt;/>/g;
     open(my $LaTeX,">frag.tex");
     print $LaTeX "\\documentclass[letterpaper,10pt,headsepline]{scrbook}\n";
     print $LaTeX "\\usepackage{natbib}\n";
