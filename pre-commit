@@ -212,9 +212,10 @@ sub testLaTeX {
     my $rawLaTeX = shift();
     $rawLaTeX =~ s/&amp;/&/g;
     $rawLaTeX =~ s/&lt;/>/g;
-    open(my $LaTeX,">frag.tex");
+    open(my $LaTeX,">doc/frag.tex");
     print $LaTeX "\\documentclass[letterpaper,10pt,headsepline]{scrbook}\n";
     print $LaTeX "\\usepackage{natbib}\n";
+    print $LaTeX "\\usepackage{epsfig}\n";
     print $LaTeX "\\usepackage[acronym]{glossaries}\n";
     print $LaTeX "\\usepackage[backref,colorlinks]{hyperref}\n";
     print $LaTeX "\\input{".$ENV{'GALACTICUS_EXEC_PATH'}."/doc/commands}\n";
@@ -224,11 +225,11 @@ sub testLaTeX {
     print $LaTeX $rawLaTeX;
     print $LaTeX "\\end{document}\n";
     close($LaTeX);
-    system("pdflatex -halt-on-error frag > frag.tmp");
-    my $log = $? ? slurp("frag.log") : undef();
+    system("cd doc; pdflatex -halt-on-error frag > frag.tmp");
+    my $log = $? ? slurp("doc/frag.log") : undef();
     foreach my $fileName ( "frag.tex", "frag.pdf", "frag.log", "frag.aux", "frag.tmp", "frag.glo" ) {
-	unlink($fileName)
-	    if ( -e $fileName );
+	unlink("doc/".$fileName)
+	    if ( -e "doc/".$fileName );
     }
     return $log;
 }
