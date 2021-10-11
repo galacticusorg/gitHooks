@@ -3,6 +3,7 @@ use strict;
 use warnings;
 use Term::ANSIColor;
 use File::Slurp qw(slurp);
+use File::Which;
 use XML::Simple;
 use XML::SAX::ParserFactory;
 use XML::Validator::Schema;
@@ -85,7 +86,7 @@ if ( which('yamllint' ) ) {
 	    if ( $stagedFile->{'status'} eq "D" );
 	next
 	    unless ( $stagedFile->{'fileName'} =~ m/\.yml$/ );
-	system("yamllint ".$stagedFile->{'fileName'}." &> /dev/null");
+	system("yamllint ".$stagedFile->{'fileName'}." > /dev/null 2>&1");
 	if ( $? != 0 ) {
 	    print color('bold red')."✕ ".color('reset')."YAML file is invalid (".$stagedFile->{'fileName'}.")\n";
 	    exit 1;
