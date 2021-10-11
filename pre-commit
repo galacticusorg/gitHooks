@@ -78,6 +78,22 @@ foreach my $stagedFile ( @stagedFiles ) {
 }
 print color('bold green')."✔ ".color('reset')."XML files\n";
 
+# Test YAML files are valid.
+if ( which('yamllint' ) ) {
+    foreach my $stagedFile ( @stagedFiles ) {
+	next
+	    if ( $stagedFile->{'status'} eq "D" );
+	next
+	    unless ( $stagedFile->{'fileName'} =~ m/\.yml$/ );
+	system("yamllint ".$stagedFile->{'fileName'}." &> /dev/null");
+	if ( $? != 0 ) {
+	    print color('bold red')."✕ ".color('reset')."YAML file is invalid (".$stagedFile->{'fileName'}.")\n";
+	    exit 1;
+	}
+    }
+    print color('bold green')."✔ ".color('reset')."YAML files\n";
+}
+     
 # Test XML and LaTeX fragments.
 my $xml = new XML::Simple();
 foreach my $stagedFile ( @stagedFiles ) {
