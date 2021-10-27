@@ -228,7 +228,7 @@ sub testLaTeX {
     # Test that a LaTeX fragment compiles.
     my $rawLaTeX = shift();
     $rawLaTeX =~ s/&amp;/&/g;
-    $rawLaTeX =~ s/&lt;/>/g;
+    $rawLaTeX =~ s/&lt;/</g;
     open(my $LaTeX,">doc/frag.tex");
     print $LaTeX "\\documentclass[letterpaper,10pt,headsepline]{scrbook}\n";
     print $LaTeX "\\usepackage{natbib}\n";
