@@ -235,6 +235,7 @@ sub testLaTeX {
     print $LaTeX "\\usepackage{epsfig}\n";
     print $LaTeX "\\usepackage[acronym]{glossaries}\n";
     print $LaTeX "\\usepackage[backref,colorlinks]{hyperref}\n";
+    print $LaTeX "\\usepackage{amssymb}\n";
     print $LaTeX "\\input{".$ENV{'GALACTICUS_EXEC_PATH'}."/doc/commands}\n";
     print $LaTeX "\\input{".$ENV{'GALACTICUS_EXEC_PATH'}."/doc/Glossary}\n";
     print $LaTeX "\\newcommand{\\docname}{tmp}\n";
