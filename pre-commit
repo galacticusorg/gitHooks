@@ -228,7 +228,7 @@ sub testLaTeX {
     # Test that a LaTeX fragment compiles.
     my $rawLaTeX = shift();
     $rawLaTeX =~ s/&amp;/&/g;
-    $rawLaTeX =~ s/&lt;/</g;
+    $rawLaTeX =~ s/&lt;/>/g;
     open(my $LaTeX,">doc/frag.tex");
     print $LaTeX "\\documentclass[letterpaper,10pt,headsepline]{scrbook}\n";
     print $LaTeX "\\usepackage{natbib}\n";
@@ -236,6 +236,7 @@ sub testLaTeX {
     print $LaTeX "\\usepackage[acronym]{glossaries}\n";
     print $LaTeX "\\usepackage[backref,colorlinks]{hyperref}\n";
     print $LaTeX "\\usepackage{amssymb}\n";
+    print $LaTeX "\\usepackage{amsmath}\n";
     print $LaTeX "\\input{".$ENV{'GALACTICUS_EXEC_PATH'}."/doc/commands}\n";
     print $LaTeX "\\input{".$ENV{'GALACTICUS_EXEC_PATH'}."/doc/Glossary}\n";
     print $LaTeX "\\newcommand{\\docname}{tmp}\n";
