@@ -1,12 +1,15 @@
 #!/usr/bin/env perl
 use strict;
 use warnings;
+use lib $ENV{'GALACTICUS_EXEC_PATH'}."/perl";
 use Term::ANSIColor;
 use File::Slurp qw(slurp);
 use File::Which;
 use XML::Simple;
 use XML::SAX::ParserFactory;
 use XML::Validator::Schema;
+use Data::Dumper;
+use Galacticus::Build::SourceTree;
 
 # Pre-commit hook for Git repos.
 # Andrew Benson (28-July-2021)
@@ -31,6 +34,46 @@ while ( my $line = <$staged> ) {
 }
 close($staged);
 
+# Fortran static analysis checks.
+my $fortranStaticCheck = 1;
+foreach my $stagedFile ( @stagedFiles ) {
+    next
+	if ( $stagedFile->{'status'} eq "D" );
+    next
+	unless ( $stagedFile->{'fileName'} =~ m/\.F90$/ );
+    # Parse the file.
+    my $tree = &Galacticus::Build::SourceTree::ParseFile($stagedFile->{'fileName'});
+    # Walk the tree.
+    my $node  = $tree;
+    my $depth = 0;
+    my $fileName;
+    while ( $node ) {
+	if ( $node->{'type'} eq "declaration" ) {
+	    foreach my $declaration ( @{$node->{'declarations'}} ) {
+		if ( $node->{'parent'}->{'type'} eq "type" && ( $declaration->{'intrinsic'} eq "type" || $declaration->{'intrinsic'} eq "class" ) && grep {$_ eq "pointer"} @{$declaration->{'attributes'}} ) {
+		    # class/type pointers in derived types should be null initialized.
+		    for(my $i=0;$i<scalar(@{$declaration->{'variables'}});++$i) {
+			next
+			    if ( $declaration->{'variables'}->[$i] =~ m/=>null\(\)$/ );
+			(my $typeName = $node->{'parent'}->{'opener'}) =~ s/.*::\s*([a-zA-Z0-9_]+).*/$1/;
+			chomp($typeName);
+			print color('bold yellow')."⚠ ".color('reset')."Pointer variable '".$declaration->{'variableNames'}->[$i]."' in type '".$typeName."' is not null initialized\n";
+			$fortranStaticCheck = 0;
+		    }
+		}
+	    }
+	}
+	# Walk to the next node in the tree.
+	$node = &Galacticus::Build::SourceTree::Walk_Tree($node,\$depth);
+    }
+}
+if ( $fortranStaticCheck ) {
+    print color('bold green')."✔ ".color('reset')."Fortran static analysis\n";
+} else {
+    print color('bold red')."✕ ".color('reset')."Fortran static analysis\n";
+}
+exit;
+    
 # Test Perl scripts compile and are executable.
 foreach my $stagedFile ( @stagedFiles ) {
     next
