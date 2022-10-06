@@ -71,8 +71,8 @@ if ( $fortranStaticCheck ) {
     print color('bold green')."✔ ".color('reset')."Fortran static analysis\n";
 } else {
     print color('bold red')."✕ ".color('reset')."Fortran static analysis\n";
+    exit 1;
 }
-exit;
     
 # Test Perl scripts compile and are executable.
 foreach my $stagedFile ( @stagedFiles ) {
