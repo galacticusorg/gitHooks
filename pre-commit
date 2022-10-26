@@ -5,6 +5,7 @@ use lib $ENV{'GALACTICUS_EXEC_PATH'}."/perl";
 use Term::ANSIColor;
 use File::Slurp qw(slurp);
 use File::Which;
+use File::Temp;
 use XML::Simple;
 use XML::SAX::ParserFactory;
 use XML::Validator::Schema;
@@ -14,23 +15,24 @@ use Galacticus::Build::SourceTree;
 # Pre-commit hook for Git repos.
 # Andrew Benson (28-July-2021)
 
+# Get the ref of the current staged files.
+my $ref = `git rev-parse --verify 'HEAD^{commit}'`;
+$ref = "4b825dc642cb6eb9a060e54bf8d69288fbee4904" # SHA for an empty repo.
+    unless ( $? == 0 );
 # Get a list of all staged files, along with their status.
 my @stagedFiles;
-open(my $staged,"git diff --cached --name-status |");
+open(my $staged,"git diff-index --cached --diff-filter=ACMRD --ignore-submodules ".$ref." |");
 while ( my $line = <$staged> ) {
     chomp($line);
     my @columns = split(" ",$line);
-    if ( $columns[0] =~ m/^R/ ) {
-	$columns[0] = "M";
-	$columns[1] = $columns[2];
-    }
     push(
-	@stagedFiles,
-	{
-	    status   => $columns[0],
-	    fileName => $columns[1]
-	}
-	);
+    	@stagedFiles,
+    	{
+	    sha      => $columns[3],
+    	    status   => $columns[4],
+    	    fileName => $columns[5]
+    	}
+    	);
 }
 close($staged);
 
@@ -38,11 +40,14 @@ close($staged);
 my $fortranStaticCheck = 1;
 foreach my $stagedFile ( @stagedFiles ) {
     next
-	if ( $stagedFile->{'status'} eq "D" );
-    next
 	unless ( $stagedFile->{'fileName'} =~ m/\.F90$/ );
     # Parse the file.
-    my $tree = &Galacticus::Build::SourceTree::ParseFile($stagedFile->{'fileName'});
+    (my $suffix = $stagedFile->{'fileName'}) =~ s/.*(\.[^\.]+)$/$1/;
+    my $tmpFile = File::Temp->new( UNLINK => 0,, SUFFIX => $suffix);
+    $stagedFile->{'tmpFileName'} = $tmpFile->filename();
+    close($tmpFile);
+    system("git cat-file blob ".$stagedFile->{'sha'}." > ".$stagedFile->{'tmpFileName'});
+    my $tree = &Galacticus::Build::SourceTree::ParseFile($stagedFile->{'tmpFileName'});
     # Walk the tree.
     my $node  = $tree;
     my $depth = 0;
@@ -88,7 +93,7 @@ foreach my $stagedFile ( @stagedFiles ) {
 	}
     }
     # Perl scripts and modules must compile.
-    system("perl -c ".$stagedFile->{'fileName'}." &> /dev/null");
+    system("perl -c ".$stagedFile->{'tmpFileName'}." &> /dev/null");
     if ( $? != 0 ) {
 	print color('bold red')."✕ ".color('reset')."Perl script/module does not compile (".$stagedFile->{'fileName'}.")\n";
 	exit 1;
@@ -102,13 +107,13 @@ foreach my $stagedFile ( @stagedFiles ) {
 	if ( $stagedFile->{'status'} eq "D" );
     next
 	unless ( $stagedFile->{'fileName'} =~ m/\.(xml|xsd)$/ );
-    system("xmllint --noout ".$stagedFile->{'fileName'});
+    system("xmllint --noout ".$stagedFile->{'tmpFileName'});
     if ( $? != 0 ) {
 	print color('bold red')."✕ ".color('reset')."XML file is invalid (".$stagedFile->{'fileName'}.")\n";
 	exit 1;
     }
     my $lineNumber = 0;
-    open(my $xmlFile,$stagedFile->{'fileName'});
+    open(my $xmlFile,$stagedFile->{'tmpFileName'});
     while ( my $line = <$xmlFile> ) {
 	++$lineNumber;
 	if ( $line =~ m/[^[:ascii:]]/ ) {
@@ -129,7 +134,7 @@ if ( which('yamllint' ) ) {
 	    if ( $stagedFile->{'status'} eq "D" );
 	next
 	    unless ( $stagedFile->{'fileName'} =~ m/\.yml$/ );
-	system("yamllint ".$stagedFile->{'fileName'}." > /dev/null 2>&1");
+	system("yamllint ".$stagedFile->{'tmpFileName'}." > /dev/null 2>&1");
 	if ( $? != 0 ) {
 	    print color('bold red')."✕ ".color('reset')."YAML file is invalid (".$stagedFile->{'fileName'}.")\n";
 	    exit 1;
@@ -154,7 +159,7 @@ foreach my $stagedFile ( @stagedFiles ) {
     my $rawDirective         ;
     my $rawLaTeX             ;
     my $strippedDirective    ;
-    open(my $code,$stagedFile->{'fileName'});
+    open(my $code,$stagedFile->{'tmpFileName'});
     while ( my $line = <$code> ) {
 	# Detect the end of a LaTeX section and change state.
 	$inLaTeX = 0
@@ -253,7 +258,7 @@ foreach my $stagedFile ( @stagedFiles ) {
     next
 	unless ( $stagedFile->{'fileName'} =~ m/\.(pl|pm|F90|Inc|h|c|cpp)$/ );
     my $lineNumber = 0;
-    open(my $code,$stagedFile->{'fileName'});
+    open(my $code,$stagedFile->{'tmpFileName'});
     while ( my $line = <$code> ) {
 	++$lineNumber;
 	if ( $line =~ m/AJB HACK/ ) {
@@ -264,6 +269,9 @@ foreach my $stagedFile ( @stagedFiles ) {
     close($code);
 }
 print color('bold green')."✔ ".color('reset')."Debugging statements removed\n";
+
+# Remove temporary files.
+unlink(map {$_->{'tmpFileName'}} @stagedFiles);
 
 exit 0;
 
