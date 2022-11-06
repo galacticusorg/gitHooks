@@ -36,17 +36,21 @@ while ( my $line = <$staged> ) {
 }
 close($staged);
 
+# Extract files to be commited.
+foreach my $stagedFile ( @stagedFiles ) {
+    (my $suffix = $stagedFile->{'fileName'}) =~ s/.*(\.[^\.]+)$/$1/;
+    my $tmpFile = File::Temp->new( UNLINK => 0, SUFFIX => $suffix);
+    $stagedFile->{'tmpFileName'} = $tmpFile->filename();
+    close($tmpFile);
+    system("git cat-file blob ".$stagedFile->{'sha'}." > ".$stagedFile->{'tmpFileName'});
+}
+
 # Fortran static analysis checks.
 my $fortranStaticCheck = 1;
 foreach my $stagedFile ( @stagedFiles ) {
     next
 	unless ( $stagedFile->{'fileName'} =~ m/\.F90$/ );
     # Parse the file.
-    (my $suffix = $stagedFile->{'fileName'}) =~ s/.*(\.[^\.]+)$/$1/;
-    my $tmpFile = File::Temp->new( UNLINK => 0,, SUFFIX => $suffix);
-    $stagedFile->{'tmpFileName'} = $tmpFile->filename();
-    close($tmpFile);
-    system("git cat-file blob ".$stagedFile->{'sha'}." > ".$stagedFile->{'tmpFileName'});
     my $tree = &Galacticus::Build::SourceTree::ParseFile($stagedFile->{'tmpFileName'});
     # Walk the tree.
     my $node  = $tree;
@@ -108,7 +112,7 @@ foreach my $stagedFile ( @stagedFiles ) {
     next
 	unless ( $stagedFile->{'fileName'} =~ m/\.(xml|xsd)$/ );
     system("xmllint --noout ".$stagedFile->{'tmpFileName'});
-    if ( $? != 0 ) {
+   if ( $? != 0 ) {
 	print color('bold red')."✕ ".color('reset')."XML file is invalid (".$stagedFile->{'fileName'}.")\n";
 	exit 1;
     }
