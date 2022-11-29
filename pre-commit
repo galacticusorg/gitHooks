@@ -49,6 +49,8 @@ foreach my $stagedFile ( @stagedFiles ) {
 my $fortranStaticCheck = 1;
 foreach my $stagedFile ( @stagedFiles ) {
     next
+	if ( $stagedFile->{'status'} eq "D" );
+    next
 	unless ( $stagedFile->{'fileName'} =~ m/\.F90$/ );
     # Parse the file.
     my $tree = &Galacticus::Build::SourceTree::ParseFile($stagedFile->{'tmpFileName'});
