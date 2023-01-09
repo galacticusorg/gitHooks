@@ -62,13 +62,13 @@ foreach my $stagedFile ( @stagedFiles ) {
 	if ( $node->{'type'} eq "declaration" ) {
 	    foreach my $declaration ( @{$node->{'declarations'}} ) {
 		if ( $node->{'parent'}->{'type'} eq "type" && ( $declaration->{'intrinsic'} eq "type" || $declaration->{'intrinsic'} eq "class" ) && grep {$_ eq "pointer"} @{$declaration->{'attributes'}} ) {
-		    # class/type pointers in derived types should be null initialized.
+		    # Class/type pointers in derived types should be null initialized.
 		    for(my $i=0;$i<scalar(@{$declaration->{'variables'}});++$i) {
 			next
 			    if ( $declaration->{'variables'}->[$i] =~ m/=>null\(\)$/ );
 			(my $typeName = $node->{'parent'}->{'opener'}) =~ s/.*::\s*([a-zA-Z0-9_]+).*/$1/;
 			chomp($typeName);
-			print color('bold yellow')."⚠ ".color('reset')."Pointer variable '".$declaration->{'variableNames'}->[$i]."' in type '".$typeName."' is not null initialized\n";
+			print color('bold yellow')."⚠ ".color('reset')."Pointer variable '".$declaration->{'variableNames'}->[$i]."' in type '".$typeName."' in file '".$stagedFile->{'fileName'}."' is not null initialized\n";
 			$fortranStaticCheck = 0;
 		    }
 		}
