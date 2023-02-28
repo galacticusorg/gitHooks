@@ -7,6 +7,7 @@ use File::Slurp qw(slurp);
 use File::Which;
 use File::Temp;
 use XML::Simple;
+use List::Uniq qw(uniq);
 use XML::SAX::ParserFactory;
 use XML::Validator::Schema;
 use Regexp::Common;
@@ -385,7 +386,6 @@ sub spellCheckFile {
 	if ( -e "work/build/stateStorables.xml" ) {
 	    my $xml            = new XML::Simple();
 	    my $stateStorables = $xml->XMLin("work/build/stateStorables.xml");
-	    my @spellWords;
 	    my @instanceNames;
 	    push(@spellWords,                                                         @{$stateStorables->{'functionClassInstances'}} );
 	    push(@spellWords,map {(my $prefix = $_) =~ s/Class$//; ($_,$prefix)} keys(%{$stateStorables->{'functionClasses'       }}));
@@ -414,9 +414,9 @@ sub spellCheckFile {
 	close($words);
     }
     open(my $dictionary,">",$fileName.".dict");
-    print $dictionary join("\n",map {lc($_)} @spellWords)."\n";
+    print $dictionary join("\n",uniq(sort(@spellWords)))."\n";
     close($dictionary);
-    
+
     # Pre-process file.
     open(my $fileIn ,"<",$fileName         );
     open(my $fileOut,">",$fileName.".spell");
@@ -425,7 +425,7 @@ sub spellCheckFile {
 	while ( my @parts = $line =~ m/^(.*)\b(?<!\\)([a-zA-Z0-9][a-zA-Z]*(?:[a-z0-9][a-zA-Z]*[A-Z]|[A-Z][a-zA-Z]*[a-z])[a-zA-Z0-9]*)\b(.*)$/g ) {
 	    my $linePrevious = $line;
 	    if ( grep {$_ eq $parts[1]} @spellWords ) {
-		$parts[1] = lc($parts[1]);
+		$parts[1] = $parts[1];
 	    } elsif ( $parts[1] eq "FoX" ) {
 		$parts[1] = "fox";
 	    } else {
