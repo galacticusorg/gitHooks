@@ -493,7 +493,7 @@ sub spellCheckFile {
     # Spell check.
     my %words;
     my $lineNumber = 0;
-    open(my $spell,"hunspell -l ".($isLaTeX ? "-t " : "")."-i utf-8 -p ".$fileName.".dict ".$fileName.".spell |");
+    open(my $spell,"hunspell -l ".($isLaTeX ? "-t " : "")."-i utf-8 -p ".$fileName.".dict ".$fileName.".spell 2>&1 | grep -v 'error - iconv:' |");
     while ( my $word = <$spell> ) {
 	++$lineNumber; 
 	chomp($word);
