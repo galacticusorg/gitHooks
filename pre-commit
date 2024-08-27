@@ -480,9 +480,14 @@ sub spellCheckFile {
 	}
 	# Translate accents. Note that we translate to unaccented characters, as hunspell seems to not handle accented characters in
 	# personal dictionaries correctly.
-	 if ( $isLaTeX ) {
+	if ( $isLaTeX ) {
 	    $line =~ s/\\'e/e/g;
 	    $line =~ s/\\"o/o/g;
+	}
+	# Remove LaTeX double quotes.
+	if ( $isLaTeX ) {
+	    $line =~ s/''//g;
+	    $line =~ s/``//g;
 	}
 	# Write the processed line to output.
 	print $fileOut $line;
