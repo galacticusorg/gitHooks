@@ -176,8 +176,13 @@ if ( which('yamllint' ) ) {
 }
      
 # Test XML and LaTeX fragments.
-my $forkManager = Parallel::ForkManager->new(Sys::CPU::cpu_count());
 my $xml         = new XML::Simple();
+my $forkManager = Parallel::ForkManager->new(Sys::CPU::cpu_count());
+$forkManager->run_on_finish( sub {
+    my ($PID, $exitCode, $identity) = @_;
+    exit $exitCode
+	unless ( $exitCode == 0 );
+});
  FILES:
     foreach my $stagedFile ( @stagedFiles ) {
 	next
@@ -480,7 +485,7 @@ sub spellCheckFile {
 	    $line     = $lineNew;
 	}
 	# Remove glossary labels.
-	 if ( $isLaTeX ) {
+	if ( $isLaTeX ) {
 	    my $bp = $RE{balanced}{-parens=>'{}'};
 	    $line =~ s/\\gls$bp/\\gls\{\}/g;
 	    $line =~ s/\\glslink$bp/\\glslink\{\}/g;
