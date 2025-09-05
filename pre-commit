@@ -14,7 +14,7 @@ use Regexp::Common;
 use Data::Dumper;
 use Galacticus::Build::SourceTree;
 use Parallel::ForkManager;
-use Sys::CPU;
+use System::CPU;
 
 # Pre-commit hook for Git repos.
 # Andrew Benson (28-July-2021)
@@ -190,7 +190,7 @@ if ( which('yamllint' ) ) {
      
 # Test XML and LaTeX fragments.
 my $xml         = new XML::Simple();
-my $forkManager = Parallel::ForkManager->new(Sys::CPU::cpu_count());
+my $forkManager = Parallel::ForkManager->new(System::CPU::get_ncpu());
 $forkManager->run_on_finish( sub {
     my ($PID, $exitCode, $identity) = @_;
     exit $exitCode
