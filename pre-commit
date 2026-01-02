@@ -6,6 +6,7 @@ use Term::ANSIColor;
 use File::Slurp qw(slurp);
 use File::Which;
 use File::Temp;
+use Fortran::Utils;
 use XML::Simple;
 use List::Uniq qw(uniq);
 use XML::SAX::ParserFactory;
@@ -67,6 +68,9 @@ foreach my $stagedFile ( @stagedFiles ) {
     my $node  = $tree;
     my $depth = 0;
     my $fileName;
+    my @types;
+    my @constructors;
+    my @destructors;
     while ( $node ) {
 	# Class/type pointers in derived types should be null initialized.
 	if ( $node->{'type'} eq "declaration" ) {
@@ -93,9 +97,52 @@ foreach my $stagedFile ( @stagedFiles ) {
 	    foreach my $variable ( keys(%countAssignments) ) {
 		if ( $countAssignments{$variable} > 1 ) {
 		    print color('bold yellow')."⚠ ".color('reset')."Duplicated assignment of '".$variable."' in `constructorAssign` directive in file '".$stagedFile->{'fileName'}."'\n";
+		    $fortranStaticCheck = 0;
 		}
 	    }
 	}	
+	# Look for empty constructors.
+	## First identify any type definitions.
+	if ( $node->{'type'} eq "type" ) {
+	    push(@types,lc($node->{'name'}));
+	}
+	## Next identify constructor functions for a known type.
+	if ( @types && $node->{'type'} eq "interface" && defined($node->{'name'}) && grep {$_ eq lc($node->{'name'})} @types ) {
+	    my $nodeChild = $node->{'firstChild'};
+	    while ( $nodeChild ) {
+		if ( $nodeChild->{'type'} eq "moduleProcedure" ) {
+		    push(@constructors,map {lc($_)} @{$nodeChild->{'names'}});
+		}
+		$nodeChild = $nodeChild->{'sibling'};
+	    }
+	}
+	## Last, check any constructor functions.
+	if ( $node->{'type'} eq "function" && grep {$_ eq lc($node->{'name'})} @constructors ) {
+	    # Check for arguments.
+	    if ( $node->{'opener'} =~ m/function\s+[a-zA-Z0-9_]+\(\)/ && $node->{'opener'} !~ m/^\s*module\s+function/ ) {
+		# No arguments - check for empty function.
+		if ( &functionIsEmpty($node) ) {
+		    print color('bold yellow')."⚠ ".color('reset')."Empty constructor function '".$node->{'name'}."' in file '".$stagedFile->{'fileName'}."'\n";
+		    $fortranStaticCheck = 0;
+		}	    
+	    }
+	}
+	# Look for empty finalizers.
+	## First identify finalizer functions.
+	if ( $node->{'type'} eq "declaration" ) {
+	    foreach my $declaration ( @{$node->{'declarations'}} ) {
+		if ( $declaration->{'intrinsic'} eq "final" ) {
+		    push(@destructors,map {lc($_)} @{$declaration->{'variables'}});
+		}
+	    }
+	}
+	## Then check finalizer functions.
+	if ( $node->{'type'} eq "subroutine" && grep {$_ eq lc($node->{'name'})} @destructors ) {
+	    if ( &functionIsEmpty($node) ) {
+		print color('bold yellow')."⚠ ".color('reset')."Empty finalizer function '".$node->{'name'}."' in file '".$stagedFile->{'fileName'}."'\n";
+		$fortranStaticCheck = 0;
+	    }
+	}
 	# Walk to the next node in the tree.
 	$node = &Galacticus::Build::SourceTree::Walk_Tree($node,\$depth);
     }
@@ -539,4 +586,46 @@ sub spellCheckFile {
 	print "\t".color('bold yellow')."⚠ ".color('reset')."Possible misspelled word '".$word."' ".($words{$word} > 1 ? "(".$words{$word}." instances)" : "")." in file '".$fileNameOriginal."'\n";
     }
     return $status;
+}
+
+sub functionIsEmpty {
+    # Return true if the provided function is empty (other than attribute ignores and a return statement.
+    my $node    = shift();
+    my $isEmpty = 1;
+    my $depth   = 0;
+    $node       = $node->{'firstChild'};
+    while ( $node && $depth >= 0 ) {
+	# Ignore module uses and declaration sections.
+	if ( $node->{'type'} eq "moduleUse" || $node->{'type'} eq "declaration" ) {
+	    $node = $node->{'sibling'};
+	} else {
+	    if ( $node->{'type'} eq 'code' ) {
+		open(my $content,"<",\$node->{'content'});
+		foreach my $line ( <$content> ) {
+		    next
+			if ( $line =~ m/^\s*$/ );
+		    next
+			if ( $line =~ m/^\s*![^\$]/ );
+		    next
+			if ( $line =~ m/^\s*use(\s*,\s*intrinsic)??\s*::/ );
+		    next
+			if ( $line =~ m/^\s*implicit\s+none\s*$/ );
+		    next
+			if ( $line =~ m/^\s*return\s*$/ );
+		    next
+			if ( $line =~ $Fortran::Utils::variableDeclarationRegEx );
+		    # Non-ignorable content.
+		    $isEmpty = 0;
+		}
+		close($content);
+	    } else {
+		# Some other structure encountered (e.g. a directive) - function is not empty.
+		$isEmpty = 0;
+		last;
+	    }
+	    # Walk to the next node in the tree.
+	    $node = &Galacticus::Build::SourceTree::Walk_Tree($node,\$depth);
+	}
+    }
+    return $isEmpty;
 }
