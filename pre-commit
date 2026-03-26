@@ -153,6 +153,26 @@ if ( $fortranStaticCheck ) {
     exit 1;
 }
 
+# Check for "file" lines in the bibliography.
+my $bibliographyValid = 1;
+foreach my $stagedFile ( @stagedFiles ) {
+    next
+	if ( $stagedFile->{'status'} eq "D" );
+    next
+	unless ( $stagedFile->{'fileName'} =~ m/\.bib$/ );
+    open(my $bibliography,$stagedFile->{'fileName'});
+    while ( my $line = <$bibliography> ) {
+	$bibliographyValid = 0
+	    if ( $line =~ m/^\s*file\s*=\s*\{/ );
+    }
+    close($bibliography);
+}
+if ( $bibliographyValid ) {
+    print color('bold green' )."✔ ".color('reset')."Validate bibliography\n";
+} else {
+    print color('bold yellow')."⚠ ".color('reset')."Validate bibliography\n";
+}
+
 # Spell-check LaTeX files.
 my $spellCheckLaTeX = 1;
 foreach my $stagedFile ( @stagedFiles ) {
