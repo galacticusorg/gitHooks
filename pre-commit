@@ -1,653 +1,777 @@
-#!/usr/bin/env perl
-use strict;
-use warnings;
-use lib $ENV{'GALACTICUS_EXEC_PATH'}."/perl";
-use Term::ANSIColor;
-use File::Slurp qw(slurp);
-use File::Which;
-use File::Temp;
-use Fortran::Utils;
-use XML::Simple;
-use XML::LibXML;
-use List::Uniq qw(uniq);
-use Regexp::Common;
-use Data::Dumper;
-use Galacticus::Build::SourceTree;
-use Parallel::ForkManager;
-use System::CPU;
-
+#!/usr/bin/env python3
 # Pre-commit hook for Git repos.
-# Andrew Benson (28-July-2021)
+# Andrew Benson (28-July-2021) — ported to Python
 
-# List of allowed class name words for spellchecking.
-my @spellWords;
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
 
-# Get the ref of the current staged files.
-my $ref = `git rev-parse --verify 'HEAD^{commit}'`;
-$ref = "4b825dc642cb6eb9a060e54bf8d69288fbee4904" # SHA for an empty repo.
-    unless ( $? == 0 );
-# Get a list of all staged files, along with their status.
-my @stagedFiles;
-open(my $staged,"git diff-index --cached --diff-filter=ACMRD --ignore-submodules ".$ref." |");
-while ( my $line = <$staged> ) {
-    chomp($line);
-    my @columns = split(" ",$line);
-    push(
-    	@stagedFiles,
-    	{
-	    sha      => $columns[3],
-    	    status   => $columns[4],
-    	    fileName => $columns[5]
-    	}
-    	);
-}
-close($staged);
+GREEN  = '\033[1;32m'
+RED    = '\033[1;31m'
+YELLOW = '\033[1;33m'
+RESET  = '\033[0m'
 
-# Extract files to be commited.
-foreach my $stagedFile ( @stagedFiles ) {
-    next
-	if ( $stagedFile->{'status'} eq "D" );
-    (my $suffix = $stagedFile->{'fileName'}) =~ s/.*(\.[^\.]+)$/$1/;
-    my $tmpFile = File::Temp->new( UNLINK => 0, SUFFIX => $suffix);
-    $stagedFile->{'tmpFileName'} = $tmpFile->filename();
-    close($tmpFile);
-    system("git cat-file blob ".$stagedFile->{'sha'}." > ".$stagedFile->{'tmpFileName'});
-}
 
-# Fortran static analysis checks.
-my $fortranStaticCheck = 1;
-foreach my $stagedFile ( @stagedFiles ) {
-    next
-	if ( $stagedFile->{'status'} eq "D" );
-    next
-	unless ( $stagedFile->{'fileName'} =~ m/\.F90$/ );
-    # Parse the file.
-    my $tree = &Galacticus::Build::SourceTree::ParseFile($stagedFile->{'tmpFileName'});
-    # Walk the tree.
-    my $node  = $tree;
-    my $depth = 0;
-    my $fileName;
-    my @types;
-    my @constructors;
-    my @destructors;
-    while ( $node ) {
-	# Class/type pointers in derived types should be null initialized.
-	if ( $node->{'type'} eq "declaration" ) {
-	    foreach my $declaration ( @{$node->{'declarations'}} ) {
-		if ( $node->{'parent'}->{'type'} eq "type" && ( $declaration->{'intrinsic'} eq "type" || $declaration->{'intrinsic'} eq "class" ) && grep {$_ eq "pointer"} @{$declaration->{'attributes'}} ) {
-		    for(my $i=0;$i<scalar(@{$declaration->{'variables'}});++$i) {
-			next
-			    if ( $declaration->{'variables'}->[$i] =~ m/=>null\(\)$/ );
-			(my $typeName = $node->{'parent'}->{'opener'}) =~ s/.*::\s*([a-zA-Z0-9_]+).*/$1/;
-			chomp($typeName);
-			print color('bold yellow')."⚠ ".color('reset')."Pointer variable '".$declaration->{'variableNames'}->[$i]."' in type '".$typeName."' in file '".$stagedFile->{'fileName'}."' is not null initialized\n";
-			$fortranStaticCheck = 0;
-		    }
-		}
-	    }
-	}
-	# Look for duplicated assignments in `constructorAssign` directives.
-	if ( $node->{'type'} eq "constructorAssign" ) {
-	    my @variables = split(/\s*,\s*/,$node->{'directive'}->{'variables'});
-	    my %countAssignments;
-	    foreach my $variable ( @variables ) {
-		++$countAssignments{$variable};
-	    }
-	    foreach my $variable ( keys(%countAssignments) ) {
-		if ( $countAssignments{$variable} > 1 ) {
-		    print color('bold yellow')."⚠ ".color('reset')."Duplicated assignment of '".$variable."' in `constructorAssign` directive in file '".$stagedFile->{'fileName'}."'\n";
-		    $fortranStaticCheck = 0;
-		}
-	    }
-	}	
-	# Look for empty constructors.
-	## First identify any type definitions.
-	if ( $node->{'type'} eq "type" ) {
-	    push(@types,lc($node->{'name'}));
-	}
-	## Next identify constructor functions for a known type.
-	if ( @types && $node->{'type'} eq "interface" && defined($node->{'name'}) && grep {$_ eq lc($node->{'name'})} @types ) {
-	    my $nodeChild = $node->{'firstChild'};
-	    while ( $nodeChild ) {
-		if ( $nodeChild->{'type'} eq "moduleProcedure" ) {
-		    push(@constructors,map {lc($_)} @{$nodeChild->{'names'}});
-		}
-		$nodeChild = $nodeChild->{'sibling'};
-	    }
-	}
-	## Last, check any constructor functions.
-	if ( $node->{'type'} eq "function" && grep {$_ eq lc($node->{'name'})} @constructors ) {
-	    # Check for arguments.
-	    if ( $node->{'opener'} =~ m/function\s+[a-zA-Z0-9_]+\(\)/ && $node->{'opener'} !~ m/^\s*module\s+function/ ) {
-		# No arguments - check for empty function.
-		if ( &functionIsEmpty($node) ) {
-		    print color('bold yellow')."⚠ ".color('reset')."Empty constructor function '".$node->{'name'}."' in file '".$stagedFile->{'fileName'}."'\n";
-		    $fortranStaticCheck = 0;
-		}	    
-	    }
-	}
-	# Look for empty finalizers.
-	## First identify finalizer functions.
-	if ( $node->{'type'} eq "declaration" ) {
-	    foreach my $declaration ( @{$node->{'declarations'}} ) {
-		if ( $declaration->{'intrinsic'} eq "final" ) {
-		    push(@destructors,map {lc($_)} @{$declaration->{'variables'}});
-		}
-	    }
-	}
-	## Then check finalizer functions.
-	if ( $node->{'type'} eq "subroutine" && grep {$_ eq lc($node->{'name'})} @destructors ) {
-	    if ( &functionIsEmpty($node) ) {
-		print color('bold yellow')."⚠ ".color('reset')."Empty finalizer function '".$node->{'name'}."' in file '".$stagedFile->{'fileName'}."'\n";
-		$fortranStaticCheck = 0;
-	    }
-	}
-	# Walk to the next node in the tree.
-	$node = &Galacticus::Build::SourceTree::Walk_Tree($node,\$depth);
-    }
-}
-if ( $fortranStaticCheck ) {
-    print color('bold green')."✔ ".color('reset')."Fortran static analysis\n";
-} else {
-    print color('bold red'  )."✕ ".color('reset')."Fortran static analysis\n";
-    exit 1;
-}
+def print_ok(msg):
+    print(f"{GREEN}\u2714 {RESET}{msg}")
 
-# Check for "file" lines in the bibliography.
-my $bibliographyValid = 1;
-foreach my $stagedFile ( @stagedFiles ) {
-    next
-	if ( $stagedFile->{'status'} eq "D" );
-    next
-	unless ( $stagedFile->{'fileName'} =~ m/\.bib$/ );
-    open(my $bibliography,$stagedFile->{'fileName'});
-    while ( my $line = <$bibliography> ) {
-	$bibliographyValid = 0
-	    if ( $line =~ m/^\s*file\s*=\s*\{/ );
-    }
-    close($bibliography);
-}
-if ( $bibliographyValid ) {
-    print color('bold green' )."✔ ".color('reset')."Validate bibliography\n";
-} else {
-    print color('bold yellow')."⚠ ".color('reset')."Validate bibliography\n";
-}
 
-# Spell-check LaTeX files.
-my $spellCheckLaTeX = 1;
-foreach my $stagedFile ( @stagedFiles ) {
-    next
-	if ( $stagedFile->{'status'} eq "D" );
-    next
-	unless ( $stagedFile->{'fileName'} =~ m/\.tex$/ );
-    my $statusFile = &spellCheckFile($stagedFile->{'tmpFileName'},$stagedFile->{'fileName'});
-    $spellCheckLaTeX = 0
-	unless ( $statusFile );
-}
-if ( $spellCheckLaTeX ) {
-    print color('bold green' )."✔ ".color('reset')."Spell check LaTeX\n";
-} else {
-    print color('bold yellow')."⚠ ".color('reset')."Spell check LaTeX\n";
-}
+def print_fail(msg):
+    print(f"{RED}\u2715 {RESET}{msg}")
 
-# Test Perl scripts compile and are executable.
-foreach my $stagedFile ( @stagedFiles ) {
-    next
-	if ( $stagedFile->{'status'} eq "D" );
-    next
-	unless ( $stagedFile->{'fileName'} =~ m/\.p[lm]$/ );
-    # Perl scripts must be executable.
-    if ( $stagedFile->{'fileName'} =~ m/\.pl$/ ) {
-	if ( ! -x $stagedFile->{'fileName'} ) {
-	    print color('bold red')."✕ ".color('reset')."Perl script is not executable (".$stagedFile->{'fileName'}.")\n";
-	    exit 1;
-	}
-    }
-    # Perl scripts and modules must compile.
-    system("perl -c ".$stagedFile->{'tmpFileName'}." &> /dev/null");
-    if ( $? != 0 ) {
-	print color('bold red')."✕ ".color('reset')."Perl script/module does not compile (".$stagedFile->{'fileName'}.")\n";
-	exit 1;
-    }
-}
-print color('bold green')."✔ ".color('reset')."Perl scripts\n";
 
-# Test XML files are valid.
-foreach my $stagedFile ( @stagedFiles ) {
-    next
-	if ( $stagedFile->{'status'} eq "D" );
-    next
-	unless ( $stagedFile->{'fileName'} =~ m/\.(xml|xsd)$/ );
-    system("xmllint --noout ".$stagedFile->{'tmpFileName'});
-   if ( $? != 0 ) {
-	print color('bold red')."✕ ".color('reset')."XML file is invalid (".$stagedFile->{'fileName'}.")\n";
-	exit 1;
-    }
-    my $lineNumber = 0;
-    open(my $xmlFile,$stagedFile->{'tmpFileName'});
-    while ( my $line = <$xmlFile> ) {
-	++$lineNumber;
-	if ( $line =~ m/[^[:ascii:]]/ ) {
-	    $line =~ s/([^[:ascii:]]+)/\e[31m$1\e[0m/g;
-	    print $line;
-	    print color('bold red')."✕ ".color('reset')."XML file has non-ascii character (".$stagedFile->{'fileName'}.":".$lineNumber.")\n";
-	    exit 1;
-	}
-    }
-    close($xmlFile);
-}
-print color('bold green')."✔ ".color('reset')."XML files\n";
+def print_warn(msg):
+    print(f"{YELLOW}\u26a0 {RESET}{msg}")
 
-# Test YAML files are valid.
-if ( which('yamllint' ) ) {
-    foreach my $stagedFile ( @stagedFiles ) {
-	next
-	    if ( $stagedFile->{'status'} eq "D" );
-	next
-	    unless ( $stagedFile->{'fileName'} =~ m/\.yml$/ );
-	system("yamllint ".$stagedFile->{'tmpFileName'}." > /dev/null 2>&1");
-	if ( $? != 0 ) {
-	    print color('bold red')."✕ ".color('reset')."YAML file is invalid (".$stagedFile->{'fileName'}.")\n";
-	    exit 1;
-	}
-    }
-    print color('bold green')."✔ ".color('reset')."YAML files\n";
-}
-     
-# Test XML and LaTeX fragments.
-my $xml         = new XML::Simple();
-my $forkManager = Parallel::ForkManager->new(System::CPU::get_ncpu());
-$forkManager->run_on_finish( sub {
-    my ($PID, $exitCode, $identity) = @_;
-    exit $exitCode
-	unless ( $exitCode == 0 );
-});
- FILES:
-    foreach my $stagedFile ( @stagedFiles ) {
-	next
-	    if ( $stagedFile->{'status'} eq "D" );
-	next
-	    unless ( $stagedFile->{'fileName'} =~ m/\.(F90|Inc)$/ );
-	# Fork a new process to test this file - LaTeX rendering is slow so we want to do it in parallel.
-	$forkManager->start and next FILES;
-	my $inDirective       = 0;
-	my $inXML             = 0;
-	my $inLaTeX           = 0;
-	my $inComment         = 0;
-	my $lineNumber        = 0;
-	my $directiveRoot        ;
-	my $rawCode              ;
-	my $rawDirective         ;
-	my $rawLaTeX             ;
-	my $rawComment           ;
-	my $strippedDirective    ;
-	open(my $code,$stagedFile->{'tmpFileName'});
-	while ( my $line = <$code> ) {
-	    # Detect the end of a LaTeX section and change state.
-	    $inLaTeX = 0
-		if ( $line =~ m/^\s*!!\}/ );
-	    # Detect the end of an XML section and change state.
-	    $inXML = 0
-		if ( $line =~ m/^\s*!!\]/ );
-	    # Detect the end of a LaTeX section and change state.
-	    $inComment = 0
-		if ( $line !~ m/^\s*!\s/ );
-	    # Process LaTeX blocks.
-	    $rawLaTeX .= $line
-		if ( $inLaTeX );
-	    if ( defined($rawLaTeX) && ! $inLaTeX ) {
-		my $LaTeXLog = &testLaTeX($rawLaTeX);
-		if ( defined($LaTeXLog) ) {
-		    print color('bold red')."✕ ".color('reset')."LaTeX fragment compilation failed (".$stagedFile->{'fileName'}.":".$lineNumber."):\n".$LaTeXLog;
-		    exit 1;
-		}
-		my $spellStatus = &spellCheck($rawLaTeX,"latex",$stagedFile->{'fileName'});
-		undef($rawLaTeX);
-	    }
-	    # Process comment blocks.
-	    $rawComment .= $line
-		if ( $inComment );
-	    if ( defined($rawComment) && ! $inComment ) {
-		my $spellStatus = &spellCheck($rawComment,"text",$stagedFile->{'fileName'});
-		undef($rawComment);
-	    }
-	    # Process XML blocks.
-	    my $isDirective  = 0;
-	    my $endDirective = 0;
-	    (my $strippedLine = $line) =~ s/^\s*\!<\s*//;
-	    if ( $inXML ) {
-		# Determine if line is a directive line.
-		$isDirective    = 1
-		    if ( $strippedLine =~ m/^\s*\<([^\s\>\/]+)/ || $inDirective == 1 );
-		$directiveRoot = $1
-		    if ( $isDirective == 1 && $inDirective == 0 );		
-		# Catch the end of directives.
-		$endDirective = 1
-		    if ( $isDirective == 1 && $strippedLine =~ m/\s*\<\/$directiveRoot\>/ );
-		$endDirective = 1
-		    if ( $isDirective == 1 && $inDirective == 0 && ( $strippedLine =~ m/\s*\<$directiveRoot\s.*\/\>/ || $strippedLine =~ m/\s*\<$directiveRoot\/\>/ ) );
-		# Record whether we are currently in or out of a directive.
-		$inDirective = 1
-		    if ( $isDirective == 1 );
-	    }
-	    # Accumulate raw text.
-	    if ( $inDirective ) {
-		$rawDirective      .= $line;
-		$strippedDirective .= $strippedLine;
-	    } elsif ( $line !~ m/^\s*!!(\[|\])/ ) {
-		$rawCode           .= $line;
-	    }
-	    # Process code and directive blocks as necessary.
-	    if ( ( $inDirective == 0 || eof($code) || $endDirective ) && $rawDirective ) {
-		# Attempt to parse the directive XML.
-		my $directive = eval{$xml->XMLin($strippedDirective, keepRoot => 1)};
-		if ( $@ ) {
-		    print color('bold red')."✕ ".color('reset')."Parsing XML fragment failed (".$stagedFile->{'fileName'}.":".$lineNumber.")\n".$@."\n";
-		    print $strippedDirective;
-		    exit(1);
-		}
-		my $directiveName = (keys %{$directive})[0];
-		# Validate the directive if possible.
-		if ( -e $ENV{'GALACTICUS_EXEC_PATH'}."/schema/".$directiveName.".xsd" ) {
 
-		    my $schema   = XML::LibXML::Schema->new( location =>  $ENV{'GALACTICUS_EXEC_PATH'}."/schema/".$directiveName.".xsd");
-		    my $document = XML::LibXML->load_xml( string => $strippedDirective );
-		    eval { $schema->validate( $document ) };
-		    if ( $@ ) {
-			print color('bold red')."✕ ".color('reset')."XML fragment validation failed (".$stagedFile->{'fileName'}.":".$lineNumber."):\n".$@."\n";
-			exit 1;
-		    }
-		}
-		# Look for a "description" element in the directive - this should be LaTeXable.
-		if ( exists($directive->{$directiveName}->{'description'}) ) {
-		    my $LaTeXLog = &testLaTeX($directive->{$directiveName}->{'description'});
-		    if ( defined($LaTeXLog) ) {
-			print color('bold red')."✕ ".color('reset')."XML LaTeX description compilation failed (".$stagedFile->{'fileName'}.":".$lineNumber."):\n".$LaTeXLog;
-			exit 1;
-		    }
-		    my $spellStatus = &spellCheck($directive->{$directiveName}->{'description'},"latex",$stagedFile->{'fileName'});
-		}
-		# Reset the raw directive text.
-		$inDirective = 0;
-		undef($rawDirective     );
-		undef($strippedDirective);
-	    }
-	    # Detect the start of an XML section and change state.
-	    $inXML = 1
-		if ( $line =~ m/^\s*!!\[/ );
-	    # Detect the start of a LaTeX section and change state.
-	    $inLaTeX = 1
-		if ( $line =~ m/^\s*!!\{/ );
-	    # Detect the start of a comment section and change state.
-	    if ( $line =~ m/^\s*!\s/ ) {
-		$inComment   = 1;
-		$rawComment .= $line;
-	    }
-	    # Increment line number count.
-	    ++$lineNumber;
-	}
-	close($code);
-	# Finish our forked process.
-	$forkManager->finish;
-}
-# Wait on all forked processes.
-$forkManager->wait_all_children;
-print color('bold green')."✔ ".color('reset')."XML fragments\n";
-print color('bold green')."✔ ".color('reset')."LaTeX fragments\n";
+# ── Staged files ─────────────────────────────────────────────────────────────
 
-# Test Perl scripts/modules and source files have no debugging statements in them.
-foreach my $stagedFile ( @stagedFiles ) {
-    next
-	if ( $stagedFile->{'status'} eq "D" );
-    next
-	unless ( $stagedFile->{'fileName'} =~ m/\.(pl|pm|F90|Inc|h|c|cpp)$/ );
-    my $lineNumber = 0;
-    open(my $code,$stagedFile->{'tmpFileName'});
-    while ( my $line = <$code> ) {
-	++$lineNumber;
-	if ( $line =~ m/AJB HACK/ ) {
-	    print color('bold red')."✕ ".color('reset')."Debugging statement remains (".$stagedFile->{'fileName'}.":".$lineNumber."):\n";
-	    exit 1; 
-	}
-    }
-    close($code);
-}
-print color('bold green')."✔ ".color('reset')."Debugging statements removed\n";
+def get_staged_files():
+    try:
+        ref = subprocess.check_output(
+            ['git', 'rev-parse', '--verify', 'HEAD^{commit}'],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except subprocess.CalledProcessError:
+        # Empty repo — use the SHA for an empty tree
+        ref = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
 
-# Remove temporary files.
-unlink(map {exists($_->{'tmpFileName'}) ? $_->{'tmpFileName'} : ()} @stagedFiles);
+    result = subprocess.run(
+        ['git', 'diff-index', '--cached', '--diff-filter=ACMRD',
+         '--ignore-submodules', ref],
+        capture_output=True, text=True,
+    )
+    files = []
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        files.append({
+            'sha':         parts[3],
+            'status':      parts[4],
+            'fileName':    parts[5],
+            'tmpFileName': None,
+        })
+    return files
 
-exit 0;
 
-sub testLaTeX {
-    # Test that a LaTeX fragment compiles.
-    my $rawLaTeX = shift();
-    $rawLaTeX =~ s/&amp;/&/g;
-    $rawLaTeX =~ s/&lt;/>/g;
-    open(my $LaTeX,">doc/frag".$$.".tex");
-    print $LaTeX "\\documentclass[letterpaper,10pt,headsepline]{scrbook}\n";
-    print $LaTeX "\\usepackage{natbib}\n";
-    print $LaTeX "\\usepackage{epsfig}\n";
-    print $LaTeX "\\usepackage[acronym]{glossaries}\n";
-    print $LaTeX "\\usepackage[backref,colorlinks]{hyperref}\n";
-    print $LaTeX "\\usepackage{amssymb}\n";
-    print $LaTeX "\\usepackage{amsmath}\n";
-    print $LaTeX "\\usepackage{tensor}\n";
-    print $LaTeX "\\usepackage{xcolor}\n";
-    print $LaTeX "\\usepackage{listings}\n";
-    print $LaTeX "\\input{".$ENV{'GALACTICUS_EXEC_PATH'}."/doc/commands}\n";
-    print $LaTeX "\\input{".$ENV{'GALACTICUS_EXEC_PATH'}."/doc/Glossary}\n";
-    print $LaTeX "\\newcommand{\\docname}{tmp}\n";
-    print $LaTeX "\\begin{document}\n";
-    print $LaTeX $rawLaTeX;
-    print $LaTeX "\\end{document}\n";
-    close($LaTeX);
-    system("cd doc; pdflatex -halt-on-error frag".$$." > frag".$$.".tmp");
-    my $log = $? ? slurp("doc/frag".$$.".log") : undef();
-    foreach my $fileName ( "frag".$$.".tex", "frag".$$.".pdf", "frag".$$.".log", "frag".$$.".aux", "frag".$$.".tmp", "frag".$$.".glo" ) {
-	unlink("doc/".$fileName)
-	    if ( -e "doc/".$fileName );
-    }
-    return $log;
-}
+def extract_staged_files(files):
+    for f in files:
+        if f['status'] == 'D':
+            continue
+        suffix = os.path.splitext(f['fileName'])[1]
+        fd, tmp = tempfile.mkstemp(suffix=suffix)
+        os.close(fd)
+        f['tmpFileName'] = tmp
+        subprocess.run(
+            f"git cat-file blob {f['sha']} > {tmp}",
+            shell=True, check=True,
+        )
 
-sub spellCheck {
-    # Perform spell-checking on a text fragment.
-    my $text             = shift();
-    my $type             = shift();
-    my $fileNameOriginal = shift();
-    # Determine if this is LaTeX source.
-    my $isLaTeX = $type eq "latex";
-    my $suffix  = $isLaTeX ? ".tex" : ".txt";
-    # Build a temporary file.
-    my $tmpFile = File::Temp->new( UNLINK => 0, SUFFIX => $suffix);
-    my $fileName = $tmpFile->filename();
-    print $tmpFile $text;
-    close($tmpFile);
-    # Do the spell check.
-    my $status = &spellCheckFile($fileName,$fileNameOriginal);
-    # Clean up.
-    unlink($fileName);
-    return $status;
-}
 
-sub spellCheckFile {
-    # Perform spell-checking on a file.
-    # Get file name and determine if this is a LaTeX file.
-    my $fileName         = shift();
-    my $fileNameOriginal = shift();
-    my $isLaTeX          = $fileName =~ m/\.tex$/;
-    
-    # Load functionClass names.
-    unless ( @spellWords ) {
-	if ( -e "work/build/stateStorables.xml" ) {
-	    my $xml            = new XML::Simple();
-	    my $stateStorables = $xml->XMLin("work/build/stateStorables.xml");
-	    my @instanceNames;
-	    push(@spellWords,                                                         @{$stateStorables->{'functionClassInstances'}} );
-	    push(@spellWords,map {(my $prefix = $_) =~ s/Class$//; ($_,$prefix)} keys(%{$stateStorables->{'functionClasses'       }}));
-	    foreach my $instanceName ( @{$stateStorables->{'functionClassInstances'}} ) {
-		my $matchLongest   = 0;
-		my $instanceSuffix    ;
-		foreach my $className ( keys(%{$stateStorables->{'functionClasses'}}) ) {
-		    (my $classPrefix = $className) =~ s/Class$//;
-		    if ( $instanceName =~ m/^$classPrefix/ ) {
-			if ( length($classPrefix) > $matchLongest ) {
-			    $matchLongest = length($classPrefix);
-			    ($instanceSuffix = $instanceName) =~ s/^$classPrefix//;
-			    $instanceSuffix = lcfirst($instanceSuffix);
-			}
-		    }
-		}
-		push(@spellWords,$instanceSuffix)
-		    if ( defined($instanceSuffix) );
-	    }
-	}
-	open(my $words,"<","aux/words.dict");
-	while ( my $line = <$words> ) {
-	    chomp($line);
-	    push(@spellWords,$line);
-	}
-	close($words);
-    }
-    open(my $dictionary,">",$fileName.".dict");
-    print $dictionary join("\n",uniq(sort(@spellWords)))."\n";
-    close($dictionary);
+def cleanup(files):
+    for f in files:
+        if f.get('tmpFileName') and os.path.exists(f['tmpFileName']):
+            try:
+                os.unlink(f['tmpFileName'])
+            except OSError:
+                pass
 
-    # Pre-process file.
-    open(my $fileIn ,"<",$fileName         );
-    open(my $fileOut,">",$fileName.".spell");
-    while ( my $line = <$fileIn> ) {
-	# Split camelCase words into their components.
-	while ( my @parts = $line =~ m/^(.*)\b(?<!\\)([a-zA-Z0-9][a-zA-Z]*(?:[a-z0-9][a-zA-Z]*[A-Z]|[A-Z][a-zA-Z]*[a-z])[a-zA-Z0-9]*)\b(.*)$/g ) {
-	    my $linePrevious = $line;
-	    if ( grep {$_ eq $parts[1]} @spellWords ) {
-		$parts[1] = $parts[1];
-	    } elsif ( $parts[1] eq "FoX" ) {
-		$parts[1] = "fox";
-	    } else {
-		$parts[1] =~ s/([a-z0-9])([A-Z0-9])/$1 $2/g;
-	    }
-	    $line = $parts[0].$parts[1].$parts[2]."\n";
-	    last
-		if ( $line eq $linePrevious );
-	}
-	# Remove non-roman text in LaTeX subscripts.
-	## Cases where the subscript starts with a "{".
-	 if ( $isLaTeX ) {
-	    my $lineNew;
-	    my $bp = $RE{balanced}{-parens=>'{}'};
-	    while ( $line =~ m/^(.*?_)($bp)/ ) {
-		$line     = substr($line,length($1)+length($2));
-		$lineNew .= $1."{";
-		my $subscript = substr($2,1,length($2)-2);
-		my $subscriptNew = "";
-		while ( $subscript =~ m/^(.*?)(\\mathrm($bp))/ ) {
-		    $subscriptNew .= "\\mathrm{".(length($3) > 4 ? $3 : "{}")."}";
-		    $subscript     = substr($subscript,length($1)+length($2));
-		}
-		$subscript = $subscriptNew;
-		$lineNew  .= $subscript."}";
-	    }
-	    $lineNew .= $line;
-	    $line     = $lineNew;
-	}
-	## Cases where the subscript starts with a "\mathrm{".
-	 if ( $isLaTeX ) {
-	    my $lineNew;
-	    my $bp = $RE{balanced}{-parens=>'{}'};
-	    while ( $line =~ m/^(.*?_\\mathrm)($bp)/ ) {
-		$line     = substr($line,length($1)+length($2));
-		$lineNew .= $1."{";
-		my $subscript = substr($2,1,length($2)-2);
-		$subscript = length($subscript) > 2 ? $subscript : "";
-		$lineNew      .= $subscript."}";
-	    }
-	    $lineNew .= $line;
-	    $line     = $lineNew;
-	}
-	# Remove glossary labels.
-	if ( $isLaTeX ) {
-	    my $bp = $RE{balanced}{-parens=>'{}'};
-	    $line =~ s/\\gls$bp/\\gls\{\}/g;
-	    $line =~ s/\\glslink$bp/\\glslink\{\}/g;
-	    $line =~ s/\\newacronym$bp$bp/\\newacronym\{\}\{\}/g;
-	    $line =~ s/\\newglossaryentry$bp\{name=$bp/\\newglossaryentry\{\}\{/g;
-	    $line =~ s/firstplural=/first plural=/g;
-	}
-	# Translate accents. Note that we translate to unaccented characters, as hunspell seems to not handle accented characters in
-	# personal dictionaries correctly.
-	if ( $isLaTeX ) {
-	    $line =~ s/\\'e/e/g;
-	    $line =~ s/\\"o/o/g;
-	}
-	# Remove LaTeX double quotes.
-	if ( $isLaTeX ) {
-	    $line =~ s/''//g;
-	    $line =~ s/``//g;
-	}
-	# Write the processed line to output.
-	print $fileOut $line;
-    }
-    close($fileIn );
-    close($fileOut);
 
-    # Spell check.
-    my %words;
-    my $lineNumber = 0;
-    open(my $spell,"hunspell -l ".($isLaTeX ? "-t " : "")."-i utf-8 -p ".$fileName.".dict ".$fileName.".spell 2>&1 | grep -v 'error - iconv:' |");
-    while ( my $word = <$spell> ) {
-	++$lineNumber; 
-	chomp($word);
-	$words{lc($word)}++;
-    }
-    close($spell);
-    unlink($fileName.".spell",$fileName.".dict");
-    my $status = scalar(keys(%words)) == 0;
-    foreach my $word ( sort(keys(%words)) ) {
-	print "\t".color('bold yellow')."⚠ ".color('reset')."Possible misspelled word '".$word."' ".($words{$word} > 1 ? "(".$words{$word}." instances)" : "")." in file '".$fileNameOriginal."'\n";
-    }
-    return $status;
-}
+# ── Fortran static analysis ──────────────────────────────────────────────────
 
-sub functionIsEmpty {
-    # Return true if the provided function is empty (other than attribute ignores and a return statement.
-    my $node    = shift();
-    my $isEmpty = 1;
-    my $depth   = 0;
-    $node       = $node->{'firstChild'};
-    while ( $node && $depth >= 0 ) {
-	# Ignore module uses and declaration sections.
-	if ( $node->{'type'} eq "moduleUse" || $node->{'type'} eq "declaration" ) {
-	    $node = $node->{'sibling'};
-	} else {
-	    if ( $node->{'type'} eq 'code' ) {
-		open(my $content,"<",\$node->{'content'});
-		foreach my $line ( <$content> ) {
-		    next
-			if ( $line =~ m/^\s*$/ );
-		    next
-			if ( $line =~ m/^\s*![^\$]/ );
-		    next
-			if ( $line =~ m/^\s*use(\s*,\s*intrinsic)??\s*::/ );
-		    next
-			if ( $line =~ m/^\s*implicit\s+none\s*$/ );
-		    next
-			if ( $line =~ m/^\s*return\s*$/ );
-		    next
-			if ( $line =~ $Fortran::Utils::variableDeclarationRegEx );
-		    # Non-ignorable content.
-		    $isEmpty = 0;
-		}
-		close($content);
-	    } else {
-		# Some other structure encountered (e.g. a directive) - function is not empty.
-		$isEmpty = 0;
-		last;
-	    }
-	    # Walk to the next node in the tree.
-	    $node = &Galacticus::Build::SourceTree::Walk_Tree($node,\$depth);
-	}
-    }
-    return $isEmpty;
-}
+# Simplified Fortran variable-declaration pattern (mirrors Fortran::Utils)
+_DECL_RE = re.compile(
+    r'^\s*(?:integer|real|complex|logical|character|double\s+precision'
+    r'|type\s*\(|class\s*\().*::',
+    re.IGNORECASE,
+)
+
+
+def _function_is_empty(body_lines):
+    """Return True if a Fortran function/subroutine body is effectively empty."""
+    in_docstring = False
+    for line in body_lines:
+        s = line.strip()
+        if not s:
+            continue
+        if re.match(r'^\s*!!\}', s):
+            in_docstring = False
+            continue
+        if re.match(r'^\s*!!\{', s):
+            in_docstring = True
+            continue
+        if in_docstring:
+            continue
+        if re.match(r'^![^\$]', s):          # comment, but not !$ directive
+            continue
+        if re.match(r'^use(\s*,\s*intrinsic)?\s*::', s, re.IGNORECASE):
+            continue
+        if re.match(r'^implicit\s+none\s*$', s, re.IGNORECASE):
+            continue
+        if re.match(r'^return\s*$', s, re.IGNORECASE):
+            continue
+        if _DECL_RE.match(s):
+            continue
+        return False
+    return True
+
+
+def check_fortran_static(files):
+    all_ok = True
+
+    for f in files:
+        if f['status'] == 'D' or not f['fileName'].endswith('.F90'):
+            continue
+
+        with open(f['tmpFileName'], 'r', errors='replace') as fh:
+            lines = fh.readlines()
+
+        # ── Check 1: type/class pointer vars without =>null() in derived types
+        in_type   = False
+        type_name = ''
+        for line in lines:
+            # Type definition start: "type [, attrs] :: name" or "type name"
+            m = re.match(r'^\s*type(?:\s*,\s*[^:]+)?\s*::\s*(\w+)', line, re.IGNORECASE)
+            if not m:
+                m = re.match(r'^\s*type\s+(\w+)\s*$', line, re.IGNORECASE)
+            if m:
+                in_type   = True
+                type_name = m.group(1)
+            if re.match(r'^\s*end\s+type\b', line, re.IGNORECASE):
+                in_type   = False
+                type_name = ''
+            if in_type:
+                m = re.match(
+                    r'^\s*(?:type|class)\s*\(\s*\w+\s*\)\s*,[^:]*pointer[^:]*::\s*(.+)',
+                    line, re.IGNORECASE,
+                )
+                if m:
+                    for var in re.split(r',(?![^(]*\))', m.group(1)):
+                        var = var.strip()
+                        if var and '=>null()' not in var.replace(' ', '').lower():
+                            vname = re.split(r'=>', var)[0].strip()
+                            print(f"\t{YELLOW}\u26a0 {RESET}Pointer variable '{vname}'"
+                                  f" in type '{type_name}'"
+                                  f" in file '{f['fileName']}' is not null initialized")
+                            all_ok = False
+
+        # ── Check 2: duplicate assignments in constructorAssign directives
+        for line in lines:
+            if 'constructorAssign' not in line:
+                continue
+            vm = re.search(r'variables\s*=\s*["\']([^"\']+)["\']', line)
+            if not vm:
+                continue
+            variables = re.split(r'\s*,\s*', vm.group(1))
+            counts = {}
+            for v in variables:
+                counts[v] = counts.get(v, 0) + 1
+            for v, c in counts.items():
+                if c > 1:
+                    print(f"\t{YELLOW}\u26a0 {RESET}Duplicated assignment of '{v}'"
+                          f" in `constructorAssign` directive"
+                          f" in file '{f['fileName']}'")
+                    all_ok = False
+
+        # ── Checks 3 & 4: empty constructors / finalizers
+        # Collect type names
+        type_names = set()
+        for line in lines:
+            for pat in (r'^\s*type\s*(?:,\s*[^:]+)?\s*::\s*(\w+)',
+                        r'^\s*type\s+(\w+)\s*$'):
+                m = re.match(pat, line, re.IGNORECASE)
+                if m:
+                    type_names.add(m.group(1).lower())
+
+        # Collect constructor names (from matching interfaces)
+        constructors  = set()
+        finalizers    = set()
+        in_interface  = False
+        for line in lines:
+            m = re.match(r'^\s*interface\s+(\w+)\s*$', line, re.IGNORECASE)
+            if m and m.group(1).lower() in type_names:
+                in_interface = True
+            if in_interface:
+                m = re.match(r'^\s*module\s+procedure\s+(.+)', line, re.IGNORECASE)
+                if m:
+                    constructors.update(
+                        p.strip().lower()
+                        for p in re.split(r'\s*,\s*', m.group(1))
+                        if p.strip()
+                    )
+            if re.match(r'^\s*end\s+interface\b', line, re.IGNORECASE):
+                in_interface = False
+            # Collect finalizer names
+            m = re.match(r'^\s*final\s*::\s*(.+)', line, re.IGNORECASE)
+            if m:
+                finalizers.update(
+                    n.strip().lower()
+                    for n in re.split(r'\s*,\s*', m.group(1))
+                    if n.strip()
+                )
+
+        # Examine each function/subroutine body
+        for i, line in enumerate(lines):
+            # Constructor: zero-argument function (not a module function)
+            m = re.match(
+                r'^\s*(?!\s*module\s+function)(?:\w+\s+)?function\s+(\w+)\s*\(\s*\)',
+                line, re.IGNORECASE,
+            )
+            if m and not re.match(r'^\s*module\s+function', line, re.IGNORECASE):
+                fname = m.group(1).lower()
+                if fname in constructors:
+                    end_re = re.compile(
+                        r'^\s*end\s+function\s+' + re.escape(fname) + r'\b',
+                        re.IGNORECASE,
+                    )
+                    body = []
+                    j = i + 1
+                    while j < len(lines) and not end_re.match(lines[j]):
+                        body.append(lines[j])
+                        j += 1
+                    if _function_is_empty(body):
+                        print(f"\t{YELLOW}\u26a0 {RESET}Empty constructor function"
+                              f" '{m.group(1)}' in file '{f['fileName']}'")
+                        all_ok = False
+
+            # Finalizer: subroutine
+            m = re.match(r'^\s*subroutine\s+(\w+)\s*\(', line, re.IGNORECASE)
+            if m:
+                sname = m.group(1).lower()
+                if sname in finalizers:
+                    end_re = re.compile(
+                        r'^\s*end\s+subroutine\s+' + re.escape(sname) + r'\b',
+                        re.IGNORECASE,
+                    )
+                    body = []
+                    j = i + 1
+                    while j < len(lines) and not end_re.match(lines[j]):
+                        body.append(lines[j])
+                        j += 1
+                    if _function_is_empty(body):
+                        print(f"\t{YELLOW}\u26a0 {RESET}Empty finalizer function"
+                              f" '{m.group(1)}' in file '{f['fileName']}'")
+                        all_ok = False
+
+    if all_ok:
+        print_ok('Fortran static analysis')
+    else:
+        print_fail('Fortran static analysis')
+        sys.exit(1)
+
+
+# ── Bibliography ─────────────────────────────────────────────────────────────
+
+def check_bibliography(files):
+    valid = True
+    for f in files:
+        if f['status'] == 'D' or not f['fileName'].endswith('.bib'):
+            continue
+        with open(f['fileName'], 'r', errors='replace') as fh:
+            for line in fh:
+                if re.match(r'^\s*file\s*=\s*\{', line):
+                    valid = False
+    if valid:
+        print_ok('Validate bibliography')
+    else:
+        print_warn('Validate bibliography')
+
+
+# ── Spell checking ────────────────────────────────────────────────────────────
+
+_spell_words        = []
+_spell_words_loaded = False
+
+
+def _load_spell_words():
+    global _spell_words, _spell_words_loaded
+    if _spell_words_loaded:
+        return
+
+    state_storables = 'work/build/stateStorables.xml'
+    if os.path.exists(state_storables):
+        try:
+            import xml.etree.ElementTree as ET
+            root = ET.parse(state_storables).getroot()
+
+            instances = [
+                e.text.strip()
+                for e in root.findall('.//functionClassInstances/*')
+                if e.text
+            ]
+            _spell_words.extend(instances)
+
+            classes = {
+                e.tag: True
+                for e in root.findall('.//functionClasses/*')
+            }
+            for cls in classes:
+                _spell_words.append(cls)
+                prefix = re.sub(r'Class$', '', cls)
+                _spell_words.append(prefix)
+                match_longest = 0
+                for iname in instances:
+                    if iname.lower().startswith(prefix.lower()):
+                        if len(prefix) > match_longest:
+                            match_longest  = len(prefix)
+                            instance_suffix = iname[len(prefix):]
+                            if instance_suffix:
+                                instance_suffix = (instance_suffix[0].lower()
+                                                   + instance_suffix[1:])
+                                _spell_words.append(instance_suffix)
+        except Exception:
+            pass
+
+    words_file = 'aux/words.dict'
+    if os.path.exists(words_file):
+        with open(words_file, 'r', errors='replace') as fh:
+            for line in fh:
+                word = line.strip()
+                if word:
+                    _spell_words.append(word)
+
+    _spell_words_loaded = True
+
+
+def _spell_check_file(file_name, original_name):
+    """Spell-check a file. Returns True if no misspellings found."""
+    _load_spell_words()
+
+    is_latex  = file_name.endswith('.tex')
+    dict_file = file_name + '.dict'
+    spell_file = file_name + '.spell'
+
+    # Write personal dictionary
+    unique_words = sorted(set(w for w in _spell_words if w))
+    with open(dict_file, 'w') as fh:
+        fh.write('\n'.join(unique_words) + '\n')
+
+    # Pre-process the file
+    words_set = set(_spell_words)
+    _camel_re = re.compile(
+        r'\b(?<!\\)([a-zA-Z0-9][a-zA-Z]*'
+        r'(?:[a-z0-9][a-zA-Z]*[A-Z]|[A-Z][a-zA-Z]*[a-z])'
+        r'[a-zA-Z0-9]*)\b'
+    )
+
+    def _split_camel(m):
+        word = m.group(0)
+        if word in words_set:
+            return word
+        if word == 'FoX':
+            return 'fox'
+        return re.sub(r'([a-z0-9])([A-Z0-9])', r'\1 \2', word)
+
+    with open(file_name, 'r', errors='replace') as fin, \
+            open(spell_file, 'w') as fout:
+        for line in fin:
+            line = _camel_re.sub(_split_camel, line)
+
+            if is_latex:
+                # Remove non-roman text in LaTeX subscripts starting with {
+                line = re.sub(
+                    r'(_\{)([^}]*\\mathrm\{[^}]{1,2}\}[^}]*)(\})',
+                    r'\1\3', line,
+                )
+                # Remove non-roman text in LaTeX subscripts starting with \mathrm
+                line = re.sub(
+                    r'(_\\mathrm\{)([^}]{1,2})(\})',
+                    r'\1\3', line,
+                )
+                # Remove glossary labels
+                line = re.sub(r'\\gls\{[^}]*\}',          r'\\gls{}',          line)
+                line = re.sub(r'\\glslink\{[^}]*\}',       r'\\glslink{}',      line)
+                line = re.sub(r'\\newacronym(\{[^}]*\}){2}',
+                              r'\\newacronym{}{}', line)
+                line = re.sub(r'\\newglossaryentry\{[^}]*\}\{name=\{[^}]*\}',
+                              r'\\newglossaryentry{}{', line)
+                line = line.replace('firstplural=', 'first plural=')
+                # Translate accents
+                line = line.replace("\\'e", 'e').replace('\\"o', 'o')
+                # Remove LaTeX double quotes
+                line = line.replace("''", '').replace('``', '')
+
+            fout.write(line)
+
+    # Run hunspell
+    if not shutil.which('hunspell'):
+        try:
+            os.unlink(spell_file)
+            os.unlink(dict_file)
+        except OSError:
+            pass
+        return True
+
+    args = ['hunspell', '-l']
+    if is_latex:
+        args.append('-t')
+    args += ['-i', 'utf-8', '-p', dict_file, spell_file]
+
+    result = subprocess.run(args, capture_output=True, text=True)
+    misspelled = {}
+    for word in result.stdout.splitlines():
+        if 'error - iconv:' in word:
+            continue
+        w = word.strip().lower()
+        if w:
+            misspelled[w] = misspelled.get(w, 0) + 1
+
+    try:
+        os.unlink(spell_file)
+        os.unlink(dict_file)
+    except OSError:
+        pass
+
+    for word, count in sorted(misspelled.items()):
+        instances = f'({count} instances) ' if count > 1 else ''
+        print(f"\t{YELLOW}\u26a0 {RESET}Possible misspelled word '{word}' "
+              f"{instances}in file '{original_name}'")
+
+    return len(misspelled) == 0
+
+
+def _spell_check(text, text_type, original_name):
+    """Spell-check a text fragment."""
+    suffix = '.tex' if text_type == 'latex' else '.txt'
+    fd, tmp = tempfile.mkstemp(suffix=suffix)
+    with os.fdopen(fd, 'w') as fh:
+        fh.write(text)
+    status = _spell_check_file(tmp, original_name)
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    return status
+
+
+def check_spell_latex(files):
+    all_ok = True
+    for f in files:
+        if f['status'] == 'D' or not f['fileName'].endswith('.tex'):
+            continue
+        if not _spell_check_file(f['tmpFileName'], f['fileName']):
+            all_ok = False
+    if all_ok:
+        print_ok('Spell check LaTeX')
+    else:
+        print_warn('Spell check LaTeX')
+
+
+# ── Perl scripts ──────────────────────────────────────────────────────────────
+
+def check_perl_scripts(files):
+    for f in files:
+        if f['status'] == 'D' or not re.search(r'\.p[lm]$', f['fileName']):
+            continue
+        if f['fileName'].endswith('.pl') and not os.access(f['fileName'], os.X_OK):
+            print_fail(f"Perl script is not executable ({f['fileName']})")
+            sys.exit(1)
+        result = subprocess.run(
+            ['perl', '-c', f['tmpFileName']],
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            print_fail(f"Perl script/module does not compile ({f['fileName']})")
+            sys.exit(1)
+    print_ok('Perl scripts')
+
+
+# ── XML files ─────────────────────────────────────────────────────────────────
+
+def check_xml_files(files):
+    for f in files:
+        if f['status'] == 'D' or not re.search(r'\.(xml|xsd)$', f['fileName']):
+            continue
+        result = subprocess.run(
+            ['xmllint', '--noout', f['tmpFileName']],
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            print_fail(f"XML file is invalid ({f['fileName']})")
+            sys.exit(1)
+        with open(f['tmpFileName'], 'r', errors='replace') as fh:
+            for line_num, line in enumerate(fh, 1):
+                if any(ord(c) > 127 for c in line):
+                    highlighted = re.sub(
+                        r'[^\x00-\x7F]+',
+                        lambda m: f'\033[31m{m.group()}\033[0m',
+                        line,
+                    )
+                    print(highlighted, end='')
+                    print_fail(
+                        f"XML file has non-ascii character"
+                        f" ({f['fileName']}:{line_num})"
+                    )
+                    sys.exit(1)
+    print_ok('XML files')
+
+
+# ── YAML files ────────────────────────────────────────────────────────────────
+
+def check_yaml_files(files):
+    if not shutil.which('yamllint'):
+        return
+    for f in files:
+        if f['status'] == 'D' or not f['fileName'].endswith('.yml'):
+            continue
+        result = subprocess.run(
+            ['yamllint', f['tmpFileName']],
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            print_fail(f"YAML file is invalid ({f['fileName']})")
+            sys.exit(1)
+    print_ok('YAML files')
+
+
+# ── LaTeX compilation ─────────────────────────────────────────────────────────
+
+def _test_latex(raw_latex):
+    """Compile a LaTeX fragment. Returns the log on failure, None on success."""
+    raw_latex = raw_latex.replace('&amp;', '&').replace('&lt;', '>')
+    galacticus = os.environ.get('GALACTICUS_EXEC_PATH', '')
+    frag       = f'frag{os.getpid()}'
+    tex_path   = os.path.join('doc', frag + '.tex')
+
+    with open(tex_path, 'w') as fh:
+        fh.write(r'\documentclass[letterpaper,10pt,headsepline]{scrbook}' + '\n')
+        fh.write(r'\usepackage{natbib}'                                   + '\n')
+        fh.write(r'\usepackage{epsfig}'                                   + '\n')
+        fh.write(r'\usepackage[acronym]{glossaries}'                      + '\n')
+        fh.write(r'\usepackage[backref,colorlinks]{hyperref}'             + '\n')
+        fh.write(r'\usepackage{amssymb}'                                  + '\n')
+        fh.write(r'\usepackage{amsmath}'                                  + '\n')
+        fh.write(r'\usepackage{tensor}'                                   + '\n')
+        fh.write(r'\usepackage{xcolor}'                                   + '\n')
+        fh.write(r'\usepackage{listings}'                                 + '\n')
+        fh.write(f'\\input{{{galacticus}/doc/commands}}'                  + '\n')
+        fh.write(f'\\input{{{galacticus}/doc/Glossary}}'                  + '\n')
+        fh.write(r'\newcommand{\docname}{tmp}'                            + '\n')
+        fh.write(r'\begin{document}'                                      + '\n')
+        fh.write(raw_latex)
+        fh.write(r'\end{document}'                                        + '\n')
+
+    result = subprocess.run(
+        f'cd doc; pdflatex -halt-on-error {frag} > {frag}.tmp',
+        shell=True,
+    )
+
+    log = None
+    if result.returncode != 0:
+        log_path = os.path.join('doc', frag + '.log')
+        if os.path.exists(log_path):
+            with open(log_path) as fh:
+                log = fh.read()
+
+    for ext in ('.tex', '.pdf', '.log', '.aux', '.tmp', '.glo'):
+        p = os.path.join('doc', frag + ext)
+        if os.path.exists(p):
+            os.unlink(p)
+
+    return log
+
+
+# ── XML / LaTeX fragment testing ──────────────────────────────────────────────
+
+def _process_fragments_file(f):
+    """
+    Walk an F90/Inc file looking for embedded XML directives (!<) and LaTeX
+    blocks (!!{ ... !!}) and validate / compile them.  Returns 0 on success.
+    """
+    import xml.etree.ElementTree as ET
+
+    in_directive       = False
+    in_xml             = False
+    in_latex           = False
+    in_comment         = False
+    line_number        = 0
+    directive_root     = None
+    raw_directive      = ''
+    stripped_directive = ''
+    raw_latex          = None   # None = not yet inside a LaTeX block
+    raw_comment        = None   # None = not yet inside a comment block
+
+    with open(f['tmpFileName'], 'r', errors='replace') as fh:
+        lines = fh.readlines()
+
+    for line in lines:
+        # ── Detect section ends (before accumulation, matching Perl order) ──
+        if re.match(r'^\s*!!\}', line):
+            in_latex = False
+        if re.match(r'^\s*!!\]', line):
+            in_xml = False
+        if not re.match(r'^\s*!\s', line):
+            in_comment = False
+
+        # ── Accumulate LaTeX ─────────────────────────────────────────────────
+        if in_latex and raw_latex is not None:
+            raw_latex += line
+
+        # ── Process completed LaTeX block ────────────────────────────────────
+        if raw_latex is not None and not in_latex:
+            log = _test_latex(raw_latex)
+            if log is not None:
+                print_fail(
+                    f"LaTeX fragment compilation failed"
+                    f" ({f['fileName']}:{line_number}):\n{log}"
+                )
+                return 1
+            _spell_check(raw_latex, 'latex', f['fileName'])
+            raw_latex = None
+
+        # ── Accumulate comment ───────────────────────────────────────────────
+        if in_comment and raw_comment is not None:
+            raw_comment += line
+
+        # ── Process completed comment block ──────────────────────────────────
+        if raw_comment is not None and not in_comment:
+            _spell_check(raw_comment, 'text', f['fileName'])
+            raw_comment = None
+
+        # ── XML directive detection ──────────────────────────────────────────
+        stripped_line = re.sub(r'^\s*\!<\s*', '', line)
+        is_directive  = False
+        end_directive = False
+
+        if in_xml:
+            if re.match(r'^\s*<[^\s>/]+', stripped_line) or in_directive:
+                is_directive = True
+            if is_directive and not in_directive:
+                m = re.match(r'^\s*<([^\s>/]+)', stripped_line)
+                if m:
+                    directive_root = m.group(1)
+            if is_directive and directive_root:
+                if re.search(r'</' + re.escape(directive_root) + r'>', stripped_line):
+                    end_directive = True
+                if not in_directive:
+                    if (re.search(r'<' + re.escape(directive_root) + r'\s[^>]*/>', stripped_line) or
+                            re.search(r'<' + re.escape(directive_root) + r'/>', stripped_line)):
+                        end_directive = True
+            if is_directive:
+                in_directive = True
+
+        # ── Accumulate directive / code ──────────────────────────────────────
+        if in_directive:
+            raw_directive      += line
+            stripped_directive += stripped_line
+        # (raw_code accumulation omitted — not used downstream)
+
+        # ── Process completed directive ──────────────────────────────────────
+        if (not in_directive or end_directive) and raw_directive:
+            try:
+                root_elem      = ET.fromstring(stripped_directive)
+                directive_name = root_elem.tag
+            except ET.ParseError as exc:
+                print_fail(
+                    f"Parsing XML fragment failed"
+                    f" ({f['fileName']}:{line_number})\n{exc}\n"
+                )
+                print(stripped_directive)
+                return 1
+
+            # Validate against XSD schema if available
+            galacticus  = os.environ.get('GALACTICUS_EXEC_PATH', '')
+            schema_path = os.path.join(galacticus, 'schema', directive_name + '.xsd')
+            if os.path.exists(schema_path):
+                try:
+                    from lxml import etree  # type: ignore[import]
+                    schema = etree.XMLSchema(etree.parse(schema_path))
+                    schema.assertValid(etree.fromstring(stripped_directive.encode()))
+                except Exception as exc:
+                    print_fail(
+                        f"XML fragment validation failed"
+                        f" ({f['fileName']}:{line_number}):\n{exc}\n"
+                    )
+                    return 1
+
+            # If the directive has a <description>, try to compile it as LaTeX
+            desc_elem = root_elem.find('description')
+            if desc_elem is not None and desc_elem.text:
+                log = _test_latex(desc_elem.text)
+                if log is not None:
+                    print_fail(
+                        f"XML LaTeX description compilation failed"
+                        f" ({f['fileName']}:{line_number}):\n{log}"
+                    )
+                    return 1
+                _spell_check(desc_elem.text, 'latex', f['fileName'])
+
+            in_directive       = False
+            raw_directive      = ''
+            stripped_directive = ''
+
+        # ── Detect section starts (after accumulation, matching Perl order) ──
+        if re.match(r'^\s*!!\[', line):
+            in_xml = True
+        if re.match(r'^\s*!!\{', line):
+            in_latex  = True
+            raw_latex = ''
+        if re.match(r'^\s*!\s', line) and not in_comment:
+            in_comment  = True
+            raw_comment = line
+
+        line_number += 1
+
+    return 0
+
+
+def check_xml_latex_fragments(files):
+    f90_files = [
+        f for f in files
+        if f['status'] != 'D' and re.search(r'\.(F90|Inc)$', f['fileName'])
+    ]
+    # Process files in parallel using forked subprocesses (mirrors Perl ForkManager)
+    if f90_files:
+        import multiprocessing
+        with multiprocessing.Pool(processes=multiprocessing.cpu_count()) as pool:
+            results = pool.map(_process_fragments_file, f90_files)
+        for rc in results:
+            if rc != 0:
+                sys.exit(rc)
+
+    print_ok('XML fragments')
+    print_ok('LaTeX fragments')
+
+
+# ── Debugging statements ──────────────────────────────────────────────────────
+
+def check_debugging_statements(files):
+    for f in files:
+        if f['status'] == 'D':
+            continue
+        if not re.search(r'\.(pl|pm|F90|Inc|h|c|cpp)$', f['fileName']):
+            continue
+        with open(f['tmpFileName'], 'r', errors='replace') as fh:
+            for line_num, line in enumerate(fh, 1):
+                if 'AJB HACK' in line:
+                    print_fail(
+                        f"Debugging statement remains"
+                        f" ({f['fileName']}:{line_num}):"
+                    )
+                    sys.exit(1)
+    print_ok('Debugging statements removed')
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+def main():
+    files = get_staged_files()
+    extract_staged_files(files)
+    try:
+        check_fortran_static(files)
+        check_bibliography(files)
+        check_spell_latex(files)
+        check_perl_scripts(files)
+        check_xml_files(files)
+        check_yaml_files(files)
+        check_xml_latex_fragments(files)
+        check_debugging_statements(files)
+    finally:
+        cleanup(files)
+    sys.exit(0)
+
+
+if __name__ == '__main__':
+    main()
