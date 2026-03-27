@@ -91,9 +91,18 @@ _DECL_RE = re.compile(
 
 def _function_is_empty(body_lines):
     """Return True if a Fortran function/subroutine body is effectively empty."""
+    in_docstring = False
     for line in body_lines:
         s = line.strip()
         if not s:
+            continue
+        if re.match(r'^\s*!!\}', s):
+            in_docstring = False
+            continue
+        if re.match(r'^\s*!!\{', s):
+            in_docstring = True
+            continue
+        if in_docstring:
             continue
         if re.match(r'^![^\$]', s):          # comment, but not !$ directive
             continue
