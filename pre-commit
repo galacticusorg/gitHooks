@@ -128,10 +128,26 @@ def check_fortran_static(files):
         with open(f['tmpFileName'], 'r', errors='replace') as fh:
             lines = fh.readlines()
 
+        # Strip comments.
+        linesStripped = []
+        for line in lines:
+            linesStripped.append(re.sub(r'(["\'])(?:(?=(\\?))\2.)*?\1|(!).*','\1',line))
+
+        # Join continuation lines.
+        linesJoined = []
+        while linesStripped:
+            line = linesStripped.pop(0)
+            while re.search(r'&\s*$',line):
+                lineNext = linesStripped.pop(0)
+                line     = re.sub(r'&\s*$','',line    )
+                lineNext = re.sub(r'^\s*&','',lineNext)
+                line     = line.rstrip("\n") + lineNext
+            linesJoined.append(line)
+
         # ── Check 1: type/class pointer vars without =>null() in derived types
         in_type   = False
         type_name = ''
-        for line in lines:
+        for line in linesJoined:
             # Type definition start: "type [, attrs] :: name" or "type name"
             m = re.match(r'^\s*type(?:\s*,\s*[^:]+)?\s*::\s*(\w+)', line, re.IGNORECASE)
             if not m:
@@ -158,7 +174,7 @@ def check_fortran_static(files):
                             all_ok = False
 
         # ── Check 2: duplicate assignments in constructorAssign directives
-        for line in lines:
+        for line in linesJoined:
             if 'constructorAssign' not in line:
                 continue
             vm = re.search(r'variables\s*=\s*["\']([^"\']+)["\']', line)
@@ -178,7 +194,7 @@ def check_fortran_static(files):
         # ── Checks 3 & 4: empty constructors / finalizers
         # Collect type names
         type_names = set()
-        for line in lines:
+        for line in linesJoined:
             for pat in (r'^\s*type\s*(?:,\s*[^:]+)?\s*::\s*(\w+)',
                         r'^\s*type\s+(\w+)\s*$'):
                 m = re.match(pat, line, re.IGNORECASE)
@@ -189,7 +205,7 @@ def check_fortran_static(files):
         constructors  = set()
         finalizers    = set()
         in_interface  = False
-        for line in lines:
+        for line in linesJoined:
             m = re.match(r'^\s*interface\s+(\w+)\s*$', line, re.IGNORECASE)
             if m and m.group(1).lower() in type_names:
                 in_interface = True
