@@ -475,23 +475,20 @@ def check_spell_latex(files):
         print_warn('Spell check LaTeX')
 
 
-# ── Perl scripts ──────────────────────────────────────────────────────────────
+# ── Python scripts ──────────────────────────────────────────────────────────────
 
-def check_perl_scripts(files):
+def check_python_scripts(files):
     for f in files:
-        if f['status'] == 'D' or not re.search(r'\.p[lm]$', f['fileName']):
+        if f['status'] == 'D' or not re.search(r'\.py$', f['fileName']):
             continue
-        if f['fileName'].endswith('.pl') and not os.access(f['fileName'], os.X_OK):
-            print_fail(f"Perl script is not executable ({f['fileName']})")
-            sys.exit(1)
         result = subprocess.run(
-            ['perl', '-c', f['tmpFileName']],
+            ['python', '-m', 'py_compile', f['tmpFileName']],
             capture_output=True,
         )
         if result.returncode != 0:
-            print_fail(f"Perl script/module does not compile ({f['fileName']})")
+            print_fail(f"Python script does not compile ({f['fileName']})")
             sys.exit(1)
-    print_ok('Perl scripts')
+    print_ok('Python scripts')
 
 
 # ── XML files ─────────────────────────────────────────────────────────────────
@@ -779,7 +776,7 @@ def main():
         check_fortran_static(files)
         check_bibliography(files)
         check_spell_latex(files)
-        check_perl_scripts(files)
+        check_python_scripts(files)
         check_xml_files(files)
         check_yaml_files(files)
         check_xml_latex_fragments(files)
