@@ -22,3 +22,7 @@ The `pre-commit` hook runs a number of checks on staged files:
 ## pre-push
 
 The `pre-push` makes you confirm if you really, really want to push directly to the `master|main` branch - think twice before you do.....
+
+## License
+
+Released under the [MIT License](LICENSE).
