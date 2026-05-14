@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# .git/hooks/prepare-commit-msg
+# Pre-fills the commit message with a Claude-generated conventional commit.
+
+set -euo pipefail
+
+COMMIT_MSG_FILE="$1"
+COMMIT_SOURCE="${2:-}"
+
+case "$COMMIT_SOURCE" in
+  message|template|merge|squash|commit)
+    exit 0
+    ;;
+esac
+
+if [[ "${SKIP_CLAUDE:-0}" == "1" ]]; then
+  exit 0
+fi
+
+# Skip silently if claude isn't installed on this machine.
+if ! command -v claude >/dev/null 2>&1; then
+  exit 0
+fi
+
+if git diff --cached --quiet; then
+  exit 0
+fi
+
+LINES=$(git diff --cached --numstat | awk '{s+=$1+$2} END {print s+0}')
+MAX_LINES=${CLAUDE_MSG_MAX_LINES:-2000}
+if (( LINES > MAX_LINES )); then
+  exit 0
+fi
+
+DIFF=$(git diff --cached)
+FILES=$(git diff --cached --name-only)
+RECENT=$(git log -n 10 --pretty=format:'%s' 2>/dev/null || true)
+
+# Same reproducibility flags as the pre-commit hook.
+SETTINGS_JSON='{"disableAllHooks": true}'
+
+read -r -d '' PROMPT <<'EOF' || true
+Write a Conventional Commits message for the staged diff below.
+
+Format:
+  <type>(<optional scope>): <subject>
+
+  <optional body explaining WHY, wrapped at 72 chars>
+
+Rules:
+  - type is one of: feat, fix, docs, style, refactor, perf, test, build, ci, chore
+  - subject is imperative mood, lowercase, no trailing period, <= 72 chars
+  - Use a scope only if there's an obvious one from the changed paths
+  - Add a body ONLY if the "why" isn't obvious from the subject; otherwise omit
+  - If the diff is purely mechanical (formatting, renames, version bumps), keep it to one line
+  - Match the style of the recent commits shown below where reasonable
+
+Output ONLY the commit message. No code fences, no preamble, no explanation.
+EOF
+
+INPUT=$(cat <<EOF
+$PROMPT
+
+---RECENT COMMITS---
+$RECENT
+
+---FILES CHANGED---
+$FILES
+
+---DIFF---
+$DIFF
+EOF
+)
+
+MSG=$(printf '%s' "$INPUT" \
+  | claude -p \
+      --settings "$SETTINGS_JSON" \
+      --strict-mcp-config \
+      --mcp-config '{"mcpServers": {}}' \
+      --allowedTools "" \
+      --max-turns 2 \
+      --output-format json 2>/tmp/claude-msg.err) || {
+  exit 0
+}
+
+GENERATED=$(echo "$MSG" | jq -r '.result // empty')
+
+if [[ -z "$GENERATED" ]]; then
+  exit 0
+fi
+
+EXISTING=$(cat "$COMMIT_MSG_FILE")
+{
+  printf '%s\n\n' "$GENERATED"
+  printf '# --- claude suggested above; edit freely or delete to write your own ---\n'
+  printf '%s' "$EXISTING"
+} > "$COMMIT_MSG_FILE"

@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# .git/hooks/pre-commit
+# Reviews the staged diff with `claude -p` and blocks commit on serious issues.
+
+set -euo pipefail
+
+if [[ "${SKIP_CLAUDE:-0}" == "1" ]]; then
+  exit 0
+fi
+
+# Skip silently if claude isn't installed on this machine.
+if ! command -v claude >/dev/null 2>&1; then
+  exit 0
+fi
+
+if git diff --cached --quiet; then
+  exit 0
+fi
+
+LINES=$(git diff --cached --numstat | awk '{s+=$1+$2} END {print s+0}')
+MAX_LINES=${CLAUDE_HOOK_MAX_LINES:-1500}
+if (( LINES > MAX_LINES )); then
+  echo "claude pre-commit: skipping ($LINES staged lines > $MAX_LINES)" >&2
+  exit 0
+fi
+
+DIFF=$(git diff --cached)
+
+# ---- Reproducibility settings ----------------------------------------------
+# Inline settings JSON disables local hooks and statusLine. Combined with
+# --strict-mcp-config --mcp-config '{}', no user/project MCP servers load.
+# CLAUDE.md at repo root will still be appended to the system prompt, but
+# with --allowedTools "" and a tight prompt, it can't cause meaningful drift.
+SETTINGS_JSON='{"disableAllHooks": true}'
+
+read -r -d '' PROMPT <<'EOF' || true
+You are reviewing a staged git diff before commit. Flag ONLY serious issues:
+
+  - obvious bugs or logic errors introduced by this diff
+  - leftover debug code (console.log, print, dbg!, pdb.set_trace, TODO/FIXME left in)
+  - committed secrets (API keys, tokens, passwords, .env contents, private keys)
+  - merge conflict markers (<<<<<<<, =======, >>>>>>>)
+  - large blobs of commented-out code
+
+Do NOT comment on style, naming, formatting, or suggest refactors.
+If the diff is fine, return status "ok" with an empty issues array.
+
+Respond as JSON only, matching the provided schema. No prose outside the JSON.
+EOF
+
+SCHEMA='{
+  "type": "object",
+  "properties": {
+    "status": { "type": "string", "enum": ["ok", "block"] },
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "file":    { "type": "string" },
+          "line":    { "type": "string" },
+          "kind":    { "type": "string" },
+          "message": { "type": "string" }
+        },
+        "required": ["file", "kind", "message"]
+      }
+    }
+  },
+  "required": ["status", "issues"]
+}'
+
+RESULT=$(printf '%s\n\n---DIFF---\n%s\n' "$PROMPT" "$DIFF" \
+  | claude -p \
+      --settings "$SETTINGS_JSON" \
+      --strict-mcp-config \
+      --mcp-config '{"mcpServers": {}}' \
+      --allowedTools "" \
+      --max-turns 2 \
+      --output-format json \
+      --json-schema "$SCHEMA" 2>/tmp/claude-review.err) || {
+  echo "claude pre-commit: claude failed (see /tmp/claude-review.err); allowing commit" >&2
+  cat /tmp/claude-review.err
+  exit 0
+}
+
+STATUS=$(echo "$RESULT" | jq -r '.structured_output.status // "ok"')
+COST=$(echo "$RESULT"   | jq -r '.total_cost_usd // 0')
+
+if [[ "$STATUS" == "block" ]]; then
+  echo "" >&2
+  echo "claude pre-commit found issues:" >&2
+  echo "$RESULT" | jq -r '
+    .structured_output.issues[]
+    | "  • [\(.kind)] \(.file)\(if .line then ":" + .line else "" end) — \(.message)"
+  ' >&2
+  echo "" >&2
+  echo "Commit blocked. To override:  SKIP_CLAUDE=1 git commit ..." >&2
+  echo "(cost: \$$COST)" >&2
+  exit 1
+fi
+
+echo "claude pre-commit: ok (\$$COST)" >&2
+exit 0
