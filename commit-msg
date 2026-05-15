@@ -42,8 +42,8 @@ def main():
     breaking = m.group(3)
 
     ## Type is valid
-    valid_types = {'fix', 'feat', 'build', 'docs', 'style',
-                   'test', 'refactor', 'perf', 'clean'}
+    valid_types = {'fix', 'feat', 'build', 'chore', 'ci', 'docs',
+                   'style', 'test', 'refactor', 'perf', 'revert', 'clean'}
     if type_ in valid_types:
         ok('Type is valid (https://www.conventionalcommits.org)')
     else:
