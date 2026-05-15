@@ -292,7 +292,7 @@ def check_bibliography(files):
     if valid:
         print_ok('Validate bibliography')
     else:
-        print_warn('Validate bibliography')
+        print_warn('Validate bibliography: bibliography contains local file references')
 
 
 # ── Spell checking ────────────────────────────────────────────────────────────
