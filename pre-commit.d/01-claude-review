@@ -79,7 +79,10 @@ RESULT=$(printf '%s\n\n---DIFF---\n%s\n' "$PROMPT" "$DIFF" \
       --output-format json \
       --json-schema "$SCHEMA" 2>/tmp/claude-review.err) || {
   echo "claude pre-commit: claude failed (see /tmp/claude-review.err); allowing commit" >&2
+  echo error log:
   cat /tmp/claude-review.err
+  echo result:
+  echo $RESULT
   exit 0
 }
 
