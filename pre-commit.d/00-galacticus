@@ -529,14 +529,37 @@ def check_xml_files(files):
 
 # ── YAML files ────────────────────────────────────────────────────────────────
 
+def _find_yamllint_config():
+    """Return the path to a yamllint config in the repo top-level, or None.
+
+    The staged files are linted as copies in a temp directory, so yamllint
+    cannot discover a project config relative to them. Locate one explicitly
+    in the repository top-level and pass it via `-c`.
+    """
+    try:
+        toplevel = subprocess.run(
+            ['git', 'rev-parse', '--show-toplevel'],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+    except subprocess.CalledProcessError:
+        return None
+    for name in ('.yamllint', '.yamllint.yaml', '.yamllint.yml'):
+        candidate = os.path.join(toplevel, name)
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
 def check_yaml_files(files):
     if not shutil.which('yamllint'):
         return
+    config = _find_yamllint_config()
+    config_args = ['-c', config] if config else []
     for f in files:
         if f['status'] == 'D' or not f['fileName'].endswith('.yml'):
             continue
         result = subprocess.run(
-            ['yamllint', f['tmpFileName']],
+            ['yamllint', *config_args, f['tmpFileName']],
             capture_output=True,
         )
         if result.returncode != 0:

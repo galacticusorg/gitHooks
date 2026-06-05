@@ -8,11 +8,15 @@ HOOKS_DIR=".git/hooks/pre-commit.d"
 # Exit immediately if any script fails
 set -e
 
-# Set extended globbing.
-shopt -s extglob
+# Avoid running a literal glob pattern if nothing matches.
+shopt -s nullglob
 
-# Run every executable file in the directory
-for hook in "$HOOKS_DIR"/!(*~); do
+# Run every executable script whose name begins with the two-digit numerical
+# prefix convention (e.g. `00-galacticus`). This deliberately ignores artifacts
+# such as `__pycache__` directories or editor backup files.
+for hook in "$HOOKS_DIR"/[0-9][0-9]*; do
+    # Skip editor backup files (e.g. `00-galacticus~`).
+    [[ "$hook" == *~ ]] && continue
     if [ -x "$hook" ]; then
         echo "Running hook: $(basename "$hook")"
         "$hook" || exit 1
