@@ -29,7 +29,7 @@ def main():
 
     # Enforce conventional commits (https://www.conventionalcommits.org)
     ## Header line format
-    header_re = re.compile(r'^([a-zA-Z0-9]+)(\([a-zA-Z0-9]+\))?(!?):\s\S')
+    header_re = re.compile(r'^([a-zA-Z0-9]+)(\([a-zA-Z0-9_./-]+\))?(!?):\s\S')
     m = header_re.match(first_line)
     if m:
         ok('Commit message does follow Conventional Commits format'
