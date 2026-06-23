@@ -486,7 +486,7 @@ def check_python_scripts(files):
             if f['status'] == 'D' or not re.search(r'\.py$', f['fileName']):
                 continue
             result = subprocess.run(
-                ['python', '-m', 'py_compile', f['tmpFileName']],
+                ['python3', '-m', 'py_compile', f['tmpFileName']],
                 env=my_env,
                 capture_output=True,
             )
