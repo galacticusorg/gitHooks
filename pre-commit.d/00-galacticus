@@ -785,6 +785,77 @@ def check_debugging_statements(files):
     print_ok('Debugging statements removed')
 
 
+# ── Parameter-file schema ───────────────────────────────────────────────────────
+
+# Staged paths whose modification can change the generated parameter-file
+# schema: the Fortran sources (which declare functionClass implementations and
+# enumerations), the generator, the catalog builder it depends on, or the
+# schema itself.
+_SCHEMA_RELEVANT_RE = re.compile(
+    r'^(source/'
+    r'|scripts/build/parameterSchema\.py$'
+    r'|python/Galacticus/Parameters/catalog\.py$'
+    r'|schema/parameters\.xsd$)'
+)
+
+
+def check_parameter_schema(files):
+    """Verify that the generated parameter-file schema (`schema/parameters.xsd`)
+    is up to date with the sources.  Only runs in the main Galacticus repository
+    (where the generator exists) and only when a staged change could affect the
+    schema, so ordinary commits are unaffected by its (multi-second) regeneration.
+    """
+    try:
+        toplevel = subprocess.run(
+            ['git', 'rev-parse', '--show-toplevel'],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+    except subprocess.CalledProcessError:
+        return
+
+    generator = os.path.join(toplevel, 'scripts', 'build', 'parameterSchema.py')
+    if not os.path.exists(generator):
+        return   # not the main Galacticus repository
+
+    if not any(f['status'] != 'D' and _SCHEMA_RELEVANT_RE.match(f['fileName'])
+               for f in files):
+        return   # nothing staged that could change the schema
+
+    # The committed (staged) schema is what is about to land; compare the
+    # freshly regenerated schema against it.
+    staged = subprocess.run(
+        ['git', 'show', ':schema/parameters.xsd'],
+        capture_output=True, text=True,
+    )
+    if staged.returncode != 0:
+        return   # schema not tracked/staged; nothing to compare against
+
+    fd, tmp = tempfile.mkstemp(suffix='.xsd')
+    os.close(fd)
+    try:
+        result = subprocess.run(
+            ['python3', generator, toplevel, tmp],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            print_warn('Parameter schema: could not regenerate to verify; skipping')
+            return
+        with open(tmp, errors='replace') as fh:
+            regenerated = fh.read()
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+    if regenerated == staged.stdout:
+        print_ok('Parameter schema up to date')
+    else:
+        print_fail("Parameter schema is out of date with the sources"
+                   " (run 'make parameters-schema' and stage schema/parameters.xsd)")
+        sys.exit(1)
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -796,6 +867,7 @@ def main():
         check_spell(files)
         check_python_scripts(files)
         check_xml_files(files)
+        check_parameter_schema(files)
         check_yaml_files(files)
         check_xml_latex_fragments(files)
         check_debugging_statements(files)

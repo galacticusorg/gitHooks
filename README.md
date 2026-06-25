@@ -22,6 +22,7 @@ Runs a number of checks on staged files:
 * Python script compilation (`.py`);
 * XML/XSD well-formedness, plus a check for non-ASCII characters;
 * YAML linting (`.yml`, when [`yamllint`](https://yamllint.readthedocs.io) is available);
+* parameter-file schema freshness: when a staged change could affect it (a Fortran source, the schema generator, the catalog builder, or the schema itself), regenerates `schema/parameters.xsd` and blocks the commit if the committed copy is stale (skipped outside the main Galacticus repository);
 * compilation of Galacticus embedded XML and LaTeX fragments;
 * detection of leftover debugging statements (e.g. `AJB HACK`) in Perl, Fortran, and C/C++ sources.
 
