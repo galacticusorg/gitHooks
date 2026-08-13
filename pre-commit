@@ -2,8 +2,10 @@
 # Pre-commit hook for Git repos.
 # Andrew Benson (14-May-2026)
 
-# Directory containing individual pre-commit scripts
-HOOKS_DIR=".git/hooks/pre-commit.d"
+# Directory containing individual pre-commit scripts. Use the common Git
+# directory so that this resolves correctly in linked worktrees (where
+# `.git` is a file, and `.git/hooks` does not exist).
+HOOKS_DIR="$(git rev-parse --git-common-dir)/hooks/pre-commit.d"
 
 # Exit immediately if any script fails
 set -e
