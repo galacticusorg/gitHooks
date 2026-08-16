@@ -984,12 +984,17 @@ _FORMATTERS = (
 
 
 def check_source_formatting(files):
-    """Verify that staged Fortran sources match the house formatting.
+    """Report staged Fortran sources that do not match the house formatting.
 
     Runs the formatters in `--check` mode against the *staged* content rather
     than the working tree, so a partially staged file is judged on what is
     actually being committed.  Only runs in the main Galacticus repository,
     where the tools exist.
+
+    This check never blocks a commit.  The tree was not reformatted in one
+    sweep, so most files still predate the formatters; blocking would force the
+    first change to any of them to carry a whole-file reformat in the same
+    commit, mixing it with the substantive change.
     """
     try:
         toplevel = subprocess.run(
@@ -1034,11 +1039,17 @@ def check_source_formatting(files):
                            f" process {f['fileName']}; skipping")
 
     if unformatted:
-        print_fail('Source formatting')
+        # Advisory, deliberately: most of the tree predates the formatters, so
+        # blocking here would force the first change to any such file to carry
+        # a whole-file reformat in the same commit. Reporting instead lets that
+        # reformat be made as a separate follow-up commit, which is both easier
+        # to review and easier to skip past with `git blame`.
+        print_warn('Source formatting')
         for name, tool, label in unformatted:
-            print(f"    {name}: {label}s need reformatting"
-                  f" (run ./scripts/aux/{tool} {name})")
-        sys.exit(1)
+            print(f"    {name}: {label}s differ from the house style"
+                  f" (./scripts/aux/{tool} {name})")
+        print("    Consider a separate follow-up commit for the reformatting.")
+        return
     print_ok('Source formatting')
 
 
