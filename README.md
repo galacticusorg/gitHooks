@@ -17,6 +17,7 @@ The following scripts ship in `pre-commit.d/`:
 Runs a number of checks on staged files:
 
 * Fortran static analysis (e.g. empty constructors/destructors, duplicate variables in `constructorAssign` directives);
+* Fortran source formatting: runs `scripts/aux/formatModuleUses.py` and `scripts/aux/formatDeclarations.py` in `--check` mode over the staged content of `source/**.{F90,Inc}` (vendored code under `source/external/` is excluded) and reports any file whose `use` or variable declaration blocks differ from the house style. Advisory only — it never blocks the commit, since most of the tree predates the formatters and reformatting is better made as a separate follow-up commit (skipped outside the main Galacticus repository);
 * bibliography (`.bib`) file validation;
 * spell checking of LaTeX content;
 * Python script compilation (`.py`);
