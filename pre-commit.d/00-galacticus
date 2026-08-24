@@ -1053,6 +1053,62 @@ def check_source_formatting(files):
     print_ok('Source formatting')
 
 
+# ── Residual LaTeX in docstrings ──────────────────────────────────────────────
+
+# Staged paths whose modification can introduce residual LaTeX into regions that
+# have already been converted to reStructuredText: the Fortran sources that
+# carry the docstrings, the scanner itself, or its baseline.
+_RESIDUAL_RELEVANT_RE = re.compile(
+    r'^(source/.*\.(?:F90|Inc)$'
+    r'|scripts/doc/convertDocstringsToRST\.py$'
+    r'|scripts/doc/residualLatex\.py$'
+    r'|scripts/doc/residualLatexBaseline\.txt$)'
+)
+
+
+def check_residual_latex(files):
+    """Verify that no *new* LaTeX has appeared inside docstring regions that are
+    already marked as converted to reStructuredText.  Only runs in the main
+    Galacticus repository (where the converter lives) and only when a staged
+    change could introduce such markup.
+
+    The scanner walks the `source` directory, so this judges the working tree
+    rather than the staged content — a file staged only in part is assessed on
+    what is on disk.  That is the same command CI runs, and it is fast (well
+    under a second for the whole tree), so it is kept as-is rather than
+    reconstructed from a staged snapshot.
+    """
+    try:
+        toplevel = subprocess.run(
+            ['git', 'rev-parse', '--show-toplevel'],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+    except subprocess.CalledProcessError:
+        return
+
+    converter = os.path.join(toplevel, 'scripts', 'doc', 'convertDocstringsToRST.py')
+    if not os.path.exists(converter):
+        return   # not the main Galacticus repository
+
+    if not any(f['status'] != 'D' and _RESIDUAL_RELEVANT_RE.match(f['fileName'])
+               for f in files):
+        return   # nothing staged that could introduce residual LaTeX
+
+    # Run from the top level with the relative path the baseline records, so
+    # that findings key against the baseline entries.
+    result = subprocess.run(
+        ['python3', converter, '--check-residual', 'source'],
+        capture_output=True, text=True, cwd=toplevel,
+    )
+    if result.returncode == 0:
+        print_ok('Residual LaTeX in docstrings')
+        return
+    print_fail('Residual LaTeX found in regions that must be reStructuredText')
+    for line in (result.stderr or result.stdout).splitlines():
+        print(f"    {line}")
+    sys.exit(1)
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -1061,6 +1117,7 @@ def main():
     try:
         check_fortran_static(files)
         check_source_formatting(files)
+        check_residual_latex(files)
         check_bibliography(files)
         check_spell(files)
         check_python_scripts(files)
