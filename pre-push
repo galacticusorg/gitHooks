@@ -7,7 +7,7 @@ protected_branches='master|main'
 
 # Argument parsing taken from .git/hooks/pre-push.sample
 if read local_ref local_sha remote_ref remote_sha; then
-    if [[ "$remote_ref" =~ ($protected_branches) ]]; then
+    if [[ "$remote_ref" =~ ^refs/heads/($protected_branches)$ ]]; then
         echo -en "\033[1;33mYou're about to push to $remote_ref, is that what you intended? [y|n] \033[0m"
         echo -en "\033[1m"
         read -n 1 -r < /dev/tty
