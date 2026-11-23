@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # .git/hooks/prepare-commit-msg
 # Pre-fills the commit message with a Claude-generated conventional commit.
+# Opt-in, and never interferes with a commit because of a problem with Claude itself: see lib/claude.sh.
 
 set -euo pipefail
 
@@ -13,12 +14,11 @@ case "$COMMIT_SOURCE" in
     ;;
 esac
 
-if [[ "${SKIP_CLAUDE:-0}" == "1" ]]; then
-  exit 0
-fi
+CLAUDE_HOOK_NAME="claude commit message"
+# Resolve the hooks directory through the .git/hooks symlink.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/lib/claude.sh"
 
-# Skip silently if claude isn't installed on this machine.
-if ! command -v claude >/dev/null 2>&1; then
+if ! claudeHookEnabled; then
   exit 0
 fi
 
@@ -85,18 +85,22 @@ $DIFF
 EOF
 )
 
+ERROR_FILE=$(mktemp "${TMPDIR:-/tmp}/claude-msg.XXXXXX")
+trap 'rm -f "$ERROR_FILE"' EXIT
+
 MSG=$(printf '%s' "$INPUT" \
-  | claude -p \
+  | CLAUDE_HOOK_TIMEOUT="${CLAUDE_HOOK_TIMEOUT:-120}" claudeHookRun "$ERROR_FILE" -p \
       --settings "$SETTINGS_JSON" \
       --strict-mcp-config \
       --mcp-config '{"mcpServers": {}}' \
       --allowedTools "" \
       --max-turns 2 \
-      --output-format json 2>/tmp/claude-msg.err) || {
+      --output-format json) || {
+  claudeHookNote "no suggestion (claude failed or timed out)"
   exit 0
 }
 
-GENERATED=$(echo "$MSG" | jq -r '.result // empty')
+GENERATED=$(echo "$MSG" | jq -r '.result // empty' 2>/dev/null || true)
 
 if [[ -z "$GENERATED" ]]; then
   exit 0

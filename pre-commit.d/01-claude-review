@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# .git/hooks/pre-commit
-# Reviews the staged diff with `claude -p` and blocks commit on serious issues.
+# .git/hooks/pre-commit.d/01-claude-review
+# Reviews the staged diff with `claude -p` and blocks the commit on serious issues.
+# Opt-in, and never blocks a commit because of a problem with Claude itself: see ../lib/claude.sh.
 
 set -euo pipefail
 
-if [[ "${SKIP_CLAUDE:-0}" == "1" ]]; then
-  exit 0
-fi
+CLAUDE_HOOK_NAME="claude pre-commit"
+# Resolve the hooks directory through the .git/hooks symlink.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/../lib/claude.sh"
 
-# Skip silently if claude isn't installed on this machine.
-if ! command -v claude >/dev/null 2>&1; then
+if ! claudeHookEnabled; then
   exit 0
 fi
 
@@ -20,7 +20,7 @@ fi
 LINES=$(git diff --cached --numstat | awk '{s+=$1+$2} END {print s+0}')
 MAX_LINES=${CLAUDE_HOOK_MAX_LINES:-1500}
 if (( LINES > MAX_LINES )); then
-  echo "claude pre-commit: skipping ($LINES staged lines > $MAX_LINES)" >&2
+  claudeHookNote "skipping ($LINES staged lines > $MAX_LINES)"
   exit 0
 fi
 
@@ -69,25 +69,27 @@ SCHEMA='{
   "required": ["status", "issues"]
 }'
 
+ERROR_FILE=$(mktemp "${TMPDIR:-/tmp}/claude-review.XXXXXX")
+trap 'rm -f "$ERROR_FILE"' EXIT
+
 RESULT=$(printf '%s\n\n---DIFF---\n%s\n' "$PROMPT" "$DIFF" \
-  | claude -p \
+  | claudeHookRun "$ERROR_FILE" -p \
       --settings "$SETTINGS_JSON" \
       --strict-mcp-config \
       --mcp-config '{"mcpServers": {}}' \
       --allowedTools "" \
       --max-turns 8 \
       --output-format json \
-      --json-schema "$SCHEMA" 2>/tmp/claude-review.err) || {
-  echo "claude pre-commit: claude failed (see /tmp/claude-review.err); allowing commit" >&2
-  echo error log:
-  cat /tmp/claude-review.err
-  echo result:
-  echo $RESULT
+      --json-schema "$SCHEMA") || {
+  claudeHookNote "review did not complete (claude failed or timed out); allowing commit"
+  if [[ -s "$ERROR_FILE" ]]; then
+    tail -n 5 "$ERROR_FILE" | sed 's/^/  /' >&2
+  fi
   exit 0
 }
 
-STATUS=$(echo "$RESULT" | jq -r '.structured_output.status // "ok"')
-COST=$(echo "$RESULT"   | jq -r '.total_cost_usd // 0')
+STATUS=$(echo "$RESULT" | jq -r '.structured_output.status // "ok"' 2>/dev/null || echo "ok")
+COST=$(echo "$RESULT"   | jq -r '.total_cost_usd // 0'               2>/dev/null || echo "?")
 
 if [[ "$STATUS" == "block" ]]; then
   echo "" >&2
@@ -97,10 +99,10 @@ if [[ "$STATUS" == "block" ]]; then
     | "  • [\(.kind)] \(.file)\(if .line then ":" + .line else "" end) — \(.message)"
   ' >&2
   echo "" >&2
-  echo "Commit blocked. To override:  SKIP_CLAUDE=1 git commit ..." >&2
+  echo "Commit blocked. To override:  SKIP_CLAUDE=1 git commit ...  (or GALACTICUS_CLAUDE_HOOKS=0)" >&2
   echo "(cost: \$$COST)" >&2
   exit 1
 fi
 
-echo "claude pre-commit: ok (\$$COST)" >&2
+claudeHookNote "ok (\$$COST)"
 exit 0
